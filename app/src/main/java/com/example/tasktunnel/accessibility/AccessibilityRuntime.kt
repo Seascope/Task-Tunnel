@@ -1,6 +1,8 @@
 package com.example.tasktunnel.accessibility
 
+import com.example.tasktunnel.detector.InstagramDetection
 import com.example.tasktunnel.detector.YouTubeDetection
+import com.example.tasktunnel.tunnel.TunnelRuntimeState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -15,6 +17,8 @@ data class SanitizedNode(
     val editable: Boolean,
     val enabled: Boolean,
     val visibleToUser: Boolean,
+    val selected: Boolean = false,
+    val parentIndex: Int? = null,
 )
 
 data class TreeSnapshot(
@@ -30,6 +34,14 @@ data class ObservedYouTubeDetection(
     val packageName: String,
     val capturedAtMillis: Long,
     val detection: YouTubeDetection,
+    val fingerprint: String?,
+)
+
+data class ObservedInstagramDetection(
+    val packageName: String,
+    val capturedAtMillis: Long,
+    val detection: InstagramDetection,
+    val fingerprint: String,
 )
 
 enum class InspectionStatus { IDLE, ARMED, CAPTURED, UNSUPPORTED_APP, ROOT_UNAVAILABLE, ERROR }
@@ -47,6 +59,9 @@ data class AccessibilityState(
     val overlayVisible: Boolean = false,
     val currentYouTubeDetection: ObservedYouTubeDetection? = null,
     val lastYouTubeDetection: ObservedYouTubeDetection? = null,
+    val currentInstagramDetection: ObservedInstagramDetection? = null,
+    val lastInstagramDetection: ObservedInstagramDetection? = null,
+    val tunnelState: TunnelRuntimeState = TunnelRuntimeState(),
 )
 
 object AccessibilityRuntime {
@@ -78,4 +93,6 @@ object AccessibilityRuntime {
     fun requestTestOverlay() = TaskTunnelAccessibilityService.current?.scheduleTestOverlay() ?: false
 
     internal fun clearCurrentYouTubeDetection() = mutableState.update { it.copy(currentYouTubeDetection = null) }
+
+    internal fun clearCurrentInstagramDetection() = mutableState.update { it.copy(currentInstagramDetection = null) }
 }

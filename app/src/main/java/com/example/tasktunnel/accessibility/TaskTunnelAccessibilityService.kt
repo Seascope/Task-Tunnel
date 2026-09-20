@@ -3,6 +3,7 @@ package com.example.tasktunnel.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -14,12 +15,25 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.tasktunnel.BuildConfig
+import com.example.tasktunnel.detector.InstagramSurfaceDetector
+import com.example.tasktunnel.detector.InstagramSurface
 import com.example.tasktunnel.detector.YouTubeSurfaceDetector
+import com.example.tasktunnel.detector.YouTubeSurface
+import com.example.tasktunnel.diagnostics.SanitizedFingerprint
+import com.example.tasktunnel.diagnostics.YouTubeFingerprint
+import com.example.tasktunnel.tunnel.DetectedSurface
+import com.example.tasktunnel.tunnel.SupportedApp
+import com.example.tasktunnel.tunnel.TunnelCoordinator
+import com.example.tasktunnel.tunnel.TunnelPrompt
+import com.example.tasktunnel.tunnel.TunnelTask
 import java.util.ArrayDeque
 
 class TaskTunnelAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
-    private var overlayView: LinearLayout? = null
+    private val tunnelCoordinator = TunnelCoordinator()
+    private var testOverlayView: LinearLayout? = null
+    private var tunnelOverlayView: LinearLayout? = null
+    private var shownTunnelPrompt: TunnelPrompt? = null
     private var lastCaptureAtElapsed = 0L
     private var lastTargetPackage: String? = null
     private val showOverlay = Runnable { showTestOverlayNow() }
@@ -28,7 +42,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         current = this
-        AccessibilityRuntime.update { it.copy(connected = true) }
+        syncTunnelState { it.copy(connected = true) }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -42,12 +56,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val state = AccessibilityRuntime.state.value
         val packageName = activeRootPackage() ?: run {
             AccessibilityRuntime.clearCurrentYouTubeDetection()
+            AccessibilityRuntime.clearCurrentInstagramDetection()
+            failOpenCurrentSurface()
             return
         }
+        if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) AccessibilityRuntime.clearCurrentYouTubeDetection()
+        if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
+        tunnelCoordinator.observeForeground(packageName, System.currentTimeMillis())
+        syncTunnelState()
+        refreshTunnelOverlay()
         if (!isWindowEvent) {
-            if (packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE ||
-                (BuildConfig.DEBUG && state.inspectionArmed && packageName in TARGET_PACKAGES)
-            ) scheduleCapture()
+            if (shouldCapture(packageName, state.inspectionArmed)) scheduleCapture()
             return
         }
         val targetChanged = packageName in TARGET_PACKAGES &&
@@ -69,10 +88,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
 
         if (packageName !in TARGET_PACKAGES) handler.removeCallbacks(trailingCapture)
-        if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) AccessibilityRuntime.clearCurrentYouTubeDetection()
-        if (packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE ||
-            (BuildConfig.DEBUG && state.inspectionArmed && packageName in TARGET_PACKAGES)
-        ) scheduleCapture()
+        if (shouldCapture(packageName, state.inspectionArmed)) scheduleCapture()
     }
 
     override fun onInterrupt() = Unit
@@ -90,7 +106,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun tearDownRuntime() {
         handler.removeCallbacks(showOverlay)
         handler.removeCallbacks(trailingCapture)
-        removeOverlay()
+        removeTestOverlay()
+        removeTunnelOverlay()
         if (current === this) current = null
         AccessibilityRuntime.update {
             it.copy(
@@ -102,6 +119,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 overlayPending = false,
                 overlayVisible = false,
                 currentYouTubeDetection = null,
+                currentInstagramDetection = null,
+                tunnelState = com.example.tasktunnel.tunnel.TunnelRuntimeState(),
             )
         }
     }
@@ -112,13 +131,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             if (packageName in TARGET_PACKAGES) scheduleCapture() else AccessibilityRuntime.update {
                 it.copy(inspectionStatus = InspectionStatus.UNSUPPORTED_APP, inspectionDetail = "Inspection supports Instagram and YouTube only.")
             }
-        } else if (activeRootPackage() != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) handler.removeCallbacks(trailingCapture)
+        } else {
+            val packageName = activeRootPackage()
+            if (!shouldCapture(packageName, inspectionArmed = false)) handler.removeCallbacks(trailingCapture)
+        }
     }
 
     fun scheduleTestOverlay(): Boolean {
         if (!BuildConfig.DEBUG) return false
+        if (tunnelCoordinator.state.prompt != null) return false
         handler.removeCallbacks(showOverlay)
-        removeOverlay()
+        removeTestOverlay()
         AccessibilityRuntime.update { it.copy(overlayPending = true, overlayVisible = false) }
         handler.postDelayed(showOverlay, OVERLAY_DELAY_MS)
         return true
@@ -137,6 +160,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { null }
         if (root == null) {
             AccessibilityRuntime.clearCurrentYouTubeDetection()
+            AccessibilityRuntime.clearCurrentInstagramDetection()
+            failOpenCurrentSurface()
             AccessibilityRuntime.update {
                 if (BuildConfig.DEBUG && state.inspectionArmed) it.copy(
                     inspectionStatus = InspectionStatus.ROOT_UNAVAILABLE,
@@ -148,6 +173,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val packageName = try { root.packageName?.toString() } catch (_: RuntimeException) {
             recycleNode(root)
             AccessibilityRuntime.clearCurrentYouTubeDetection()
+            AccessibilityRuntime.clearCurrentInstagramDetection()
+            failOpenCurrentSurface()
             AccessibilityRuntime.update {
                 if (BuildConfig.DEBUG && state.inspectionArmed) it.copy(
                     inspectionStatus = InspectionStatus.ERROR,
@@ -157,18 +184,23 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             return
         } ?: run {
             recycleNode(root)
+            AccessibilityRuntime.clearCurrentYouTubeDetection()
+            AccessibilityRuntime.clearCurrentInstagramDetection()
+            failOpenCurrentSurface()
             return
         }
         if (packageName !in TARGET_PACKAGES) { recycleNode(root); return }
-        val stack = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        data class PendingNode(val node: AccessibilityNodeInfo, val depth: Int, val parentIndex: Int?)
+        val stack = ArrayDeque<PendingNode>()
         try {
             val nodes = ArrayList<SanitizedNode>(MAX_NODES)
-            stack.addLast(root to 0)
+            stack.addLast(PendingNode(root, 0, null))
             var truncated = false
             while (stack.isNotEmpty()) {
-                val (node, depth) = stack.removeLast()
+                val (node, depth, parentIndex) = stack.removeLast()
                 if (nodes.size >= MAX_NODES) { recycleNode(node); truncated = true; break }
                 try {
+                    val nodeIndex = nodes.size
                     nodes += SanitizedNode(
                         depth = depth,
                         className = node.className?.toString()?.take(MAX_FIELD_LENGTH),
@@ -179,38 +211,79 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                         editable = node.isEditable,
                         enabled = node.isEnabled,
                         visibleToUser = node.isVisibleToUser,
+                        selected = node.isSelected,
+                        parentIndex = parentIndex,
                     )
                     if (depth < MAX_DEPTH) {
                         val remainingCapacity = MAX_NODES - nodes.size - stack.size
                         val childLimit = minOf(node.childCount, remainingCapacity.coerceAtLeast(0))
                         if (childLimit < node.childCount) truncated = true
-                        for (index in childLimit - 1 downTo 0) node.getChild(index)?.let { stack.addLast(it to depth + 1) }
+                        for (index in childLimit - 1 downTo 0) {
+                            node.getChild(index)?.let { stack.addLast(PendingNode(it, depth + 1, nodeIndex)) }
+                        }
                     } else if (node.childCount > 0) truncated = true
                 } finally {
                     recycleNode(node)
                 }
             }
-            while (stack.isNotEmpty()) recycleNode(stack.removeLast().first)
+            while (stack.isNotEmpty()) recycleNode(stack.removeLast().node)
             val capturedAt = System.currentTimeMillis()
             val sanitizedNodes = nodes.toList()
+            val snapshot = TreeSnapshot(packageName, capturedAt, sanitizedNodes, truncated)
             val detection = if (packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
                 YouTubeSurfaceDetector.detect(packageName, sanitizedNodes)
             } else null
+            val instagramDetection = if (packageName == InstagramSurfaceDetector.INSTAGRAM_PACKAGE) {
+                InstagramSurfaceDetector.detect(packageName, sanitizedNodes)
+            } else null
             AccessibilityRuntime.update {
-                val observed = detection?.let { result -> ObservedYouTubeDetection(packageName, capturedAt, result) }
+                val observedYouTube = detection?.let { result ->
+                    ObservedYouTubeDetection(
+                        packageName,
+                        capturedAt,
+                        result,
+                        if (BuildConfig.DEBUG) YouTubeFingerprint.format(snapshot, result) else null,
+                    )
+                }
+                val observedInstagram = if (BuildConfig.DEBUG && instagramDetection != null) {
+                    ObservedInstagramDetection(
+                        packageName,
+                        capturedAt,
+                        instagramDetection,
+                        SanitizedFingerprint.format(
+                            snapshot = snapshot,
+                            appLabel = "Instagram",
+                            classification = instagramDetection.surface.name,
+                            confidence = "%.2f".format(java.util.Locale.ROOT, instagramDetection.confidence),
+                            classificationLabel = "detector",
+                        ),
+                    )
+                } else null
                 it.copy(
                     inspectionStatus = if (BuildConfig.DEBUG && it.inspectionArmed) InspectionStatus.CAPTURED else it.inspectionStatus,
                     inspectionDetail = if (BuildConfig.DEBUG && it.inspectionArmed) "Last captured sanitized tree." else it.inspectionDetail,
                     snapshot = if (BuildConfig.DEBUG && it.inspectionArmed) {
-                        TreeSnapshot(packageName, capturedAt, sanitizedNodes, truncated)
+                        snapshot
                     } else it.snapshot,
-                    currentYouTubeDetection = observed ?: it.currentYouTubeDetection,
-                    lastYouTubeDetection = observed ?: it.lastYouTubeDetection,
+                    currentYouTubeDetection = observedYouTube ?: it.currentYouTubeDetection,
+                    lastYouTubeDetection = observedYouTube ?: it.lastYouTubeDetection,
+                    currentInstagramDetection = observedInstagram ?: it.currentInstagramDetection,
+                    lastInstagramDetection = observedInstagram ?: it.lastInstagramDetection,
                 )
             }
+            detection?.let {
+                tunnelCoordinator.observeSurface(it.surface.toTunnelSurface(), capturedAt)
+            }
+            instagramDetection?.let {
+                tunnelCoordinator.observeSurface(it.surface.toTunnelSurface(), capturedAt)
+            }
+            syncTunnelState()
+            refreshTunnelOverlay()
         } catch (_: RuntimeException) {
-            while (stack.isNotEmpty()) recycleNode(stack.removeLast().first)
+            while (stack.isNotEmpty()) recycleNode(stack.removeLast().node)
             AccessibilityRuntime.clearCurrentYouTubeDetection()
+            AccessibilityRuntime.clearCurrentInstagramDetection()
+            failOpenCurrentSurface()
             AccessibilityRuntime.update {
                 if (BuildConfig.DEBUG && state.inspectionArmed) it.copy(
                     inspectionStatus = InspectionStatus.ERROR,
@@ -225,6 +298,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         return try { root.packageName?.toString() } catch (_: RuntimeException) { null } finally { recycleNode(root) }
     }
 
+    private fun shouldCapture(packageName: String?, inspectionArmed: Boolean): Boolean =
+        packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE ||
+            packageName == InstagramSurfaceDetector.INSTAGRAM_PACKAGE ||
+            (BuildConfig.DEBUG && inspectionArmed && packageName in TARGET_PACKAGES)
+
     @Suppress("DEPRECATION")
     private fun recycleNode(node: AccessibilityNodeInfo) {
         if (android.os.Build.VERSION.SDK_INT <= 32) node.recycle()
@@ -232,7 +310,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun showTestOverlayNow() {
         AccessibilityRuntime.update { it.copy(overlayPending = false) }
-        if (overlayView != null) return
+        if (testOverlayView != null || tunnelCoordinator.state.prompt != null) return
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 24, 32, 24)
@@ -244,7 +322,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             })
             addView(Button(context).apply {
                 text = "Close"
-                setOnClickListener { removeOverlay() }
+                setOnClickListener { removeTestOverlay() }
             })
         }
         val params = WindowManager.LayoutParams(
@@ -256,18 +334,173 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = 96 }
         try {
             getSystemService(WindowManager::class.java).addView(layout, params)
-            overlayView = layout
+            testOverlayView = layout
             AccessibilityRuntime.update { it.copy(overlayVisible = true) }
         } catch (_: RuntimeException) {
             AccessibilityRuntime.update { it.copy(overlayVisible = false) }
         }
     }
 
-    private fun removeOverlay() {
-        val view = overlayView ?: return
+    private fun removeTestOverlay() {
+        val view = testOverlayView ?: return
         try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
-        overlayView = null
+        testOverlayView = null
         AccessibilityRuntime.update { it.copy(overlayVisible = false) }
+    }
+
+    private fun syncTunnelState(
+        transform: (AccessibilityState) -> AccessibilityState = { it },
+    ) = AccessibilityRuntime.update { state ->
+        transform(state).copy(tunnelState = tunnelCoordinator.state)
+    }
+
+    private fun failOpenCurrentSurface() {
+        tunnelCoordinator.observeSurface(DetectedSurface.UNKNOWN, System.currentTimeMillis())
+        syncTunnelState()
+        refreshTunnelOverlay()
+    }
+
+    private fun refreshTunnelOverlay() {
+        val prompt = tunnelCoordinator.state.prompt
+        if (prompt == shownTunnelPrompt && tunnelOverlayView != null) return
+        removeTunnelOverlay()
+        if (prompt == null) return
+
+        handler.removeCallbacks(showOverlay)
+        removeTestOverlay()
+        AccessibilityRuntime.update { it.copy(overlayPending = false) }
+        val layout = when (prompt) {
+            is TunnelPrompt.PurposeGate -> purposeGateView(prompt)
+            is TunnelPrompt.Intervention -> interventionView(prompt)
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP
+            y = OVERLAY_TOP_OFFSET_PX
+        }
+        try {
+            getSystemService(WindowManager::class.java).addView(layout, params)
+            tunnelOverlayView = layout
+            shownTunnelPrompt = prompt
+        } catch (_: RuntimeException) {
+            tunnelOverlayView = null
+            shownTunnelPrompt = null
+        }
+    }
+
+    private fun purposeGateView(prompt: TunnelPrompt.PurposeGate) = baseTunnelOverlay().apply {
+        addView(overlayText("What did you open ${prompt.app.displayName} to do?", heading = true))
+        when (prompt.app) {
+            SupportedApp.INSTAGRAM -> {
+                addView(overlayButton("Reply to messages") { startTunnel(TunnelTask.INSTAGRAM_MESSAGES) })
+                addView(overlayButton("Browse intentionally") { startTunnel(TunnelTask.INSTAGRAM_BROWSE) })
+            }
+            SupportedApp.YOUTUBE -> {
+                addView(overlayButton("Search / watch something") { startTunnel(TunnelTask.YOUTUBE_SEARCH_WATCH) })
+                addView(overlayButton("Browse intentionally") { startTunnel(TunnelTask.YOUTUBE_BROWSE) })
+            }
+        }
+        addView(overlayButton("Not now") {
+            tunnelCoordinator.dismissPurposeGate()
+            syncTunnelState()
+            refreshTunnelOverlay()
+        })
+    }
+
+    private fun interventionView(prompt: TunnelPrompt.Intervention) = baseTunnelOverlay().apply {
+        addView(overlayText(taskReminder(prompt.task), heading = true))
+        addView(overlayText("${surfaceLabel(prompt.surface)} is outside this Task Tunnel."))
+        addView(overlayButton("Return") {
+            if (tunnelCoordinator.returnFromIntervention(System.currentTimeMillis())) {
+                syncTunnelState()
+                refreshTunnelOverlay()
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            }
+        })
+        addView(overlayButton("End Tunnel") {
+            tunnelCoordinator.endSession()
+            syncTunnelState()
+            refreshTunnelOverlay()
+        })
+        addView(overlayButton("Allow anyway") {
+            tunnelCoordinator.allowAnyway()
+            syncTunnelState()
+            refreshTunnelOverlay()
+        })
+    }
+
+    private fun startTunnel(task: TunnelTask) {
+        tunnelCoordinator.startSession(task, System.currentTimeMillis())
+        syncTunnelState()
+        refreshTunnelOverlay()
+        scheduleCapture()
+    }
+
+    private fun baseTunnelOverlay() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(OVERLAY_PADDING_PX, OVERLAY_PADDING_PX, OVERLAY_PADDING_PX, OVERLAY_PADDING_PX)
+        background = GradientDrawable().apply {
+            setColor(0xFA202124.toInt())
+            cornerRadius = OVERLAY_CORNER_RADIUS_PX
+        }
+        elevation = OVERLAY_ELEVATION_PX
+    }
+
+    private fun overlayText(value: String, heading: Boolean = false) = TextView(this).apply {
+        text = value
+        setTextColor(0xFFFFFFFF.toInt())
+        textSize = if (heading) 20f else 16f
+        setPadding(0, 0, 0, OVERLAY_ITEM_GAP_PX)
+    }
+
+    private fun overlayButton(label: String, action: () -> Unit) = Button(this).apply {
+        text = label
+        isAllCaps = false
+        setOnClickListener { action() }
+    }
+
+    private fun removeTunnelOverlay() {
+        tunnelOverlayView?.let { view ->
+            try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
+        }
+        tunnelOverlayView = null
+        shownTunnelPrompt = null
+    }
+
+    private fun taskReminder(task: TunnelTask): String = when (task) {
+        TunnelTask.INSTAGRAM_MESSAGES -> "You opened Instagram to reply to messages."
+        TunnelTask.INSTAGRAM_BROWSE -> "You opened Instagram to browse intentionally."
+        TunnelTask.YOUTUBE_SEARCH_WATCH -> "You opened YouTube to search for or watch something."
+        TunnelTask.YOUTUBE_BROWSE -> "You opened YouTube to browse intentionally."
+    }
+
+    private fun surfaceLabel(surface: DetectedSurface): String = when (surface) {
+        DetectedSurface.INSTAGRAM_REELS -> "Reels"
+        DetectedSurface.INSTAGRAM_EXPLORE -> "Explore"
+        DetectedSurface.YOUTUBE_SHORTS -> "Shorts"
+        else -> "This screen"
+    }
+
+    private fun InstagramSurface.toTunnelSurface(): DetectedSurface = when (this) {
+        InstagramSurface.INSTAGRAM_MESSAGES -> DetectedSurface.INSTAGRAM_MESSAGES
+        InstagramSurface.INSTAGRAM_EXPLORE -> DetectedSurface.INSTAGRAM_EXPLORE
+        InstagramSurface.INSTAGRAM_REELS -> DetectedSurface.INSTAGRAM_REELS
+        InstagramSurface.INSTAGRAM_HOME -> DetectedSurface.INSTAGRAM_HOME
+        InstagramSurface.INSTAGRAM_OTHER -> DetectedSurface.INSTAGRAM_OTHER
+        InstagramSurface.UNKNOWN -> DetectedSurface.UNKNOWN
+    }
+
+    private fun YouTubeSurface.toTunnelSurface(): DetectedSurface = when (this) {
+        YouTubeSurface.YOUTUBE_SEARCH -> DetectedSurface.YOUTUBE_SEARCH
+        YouTubeSurface.YOUTUBE_VIDEO -> DetectedSurface.YOUTUBE_VIDEO
+        YouTubeSurface.YOUTUBE_SHORTS -> DetectedSurface.YOUTUBE_SHORTS
+        YouTubeSurface.YOUTUBE_OTHER -> DetectedSurface.YOUTUBE_OTHER
+        YouTubeSurface.UNKNOWN -> DetectedSurface.UNKNOWN
     }
 
     private fun eventTypeName(type: Int) = when (type) {
@@ -278,12 +511,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     companion object {
         internal var current: TaskTunnelAccessibilityService? = null
-        private val TARGET_PACKAGES = setOf("com.instagram.android", "com.google.android.youtube")
+        private val TARGET_PACKAGES = setOf(InstagramSurfaceDetector.INSTAGRAM_PACKAGE, YouTubeSurfaceDetector.YOUTUBE_PACKAGE)
         private const val MAX_NODES = 200
         private const val MAX_DEPTH = 12
         private const val MAX_HISTORY = 8
         private const val MAX_FIELD_LENGTH = 200
         private const val CAPTURE_THROTTLE_MS = 1_000L
         private const val OVERLAY_DELAY_MS = 3_000L
+        private const val OVERLAY_TOP_OFFSET_PX = 72
+        private const val OVERLAY_PADDING_PX = 32
+        private const val OVERLAY_ITEM_GAP_PX = 12
+        private const val OVERLAY_CORNER_RADIUS_PX = 24f
+        private const val OVERLAY_ELEVATION_PX = 12f
     }
 }

@@ -2,56 +2,88 @@ package com.example.tasktunnel.detector
 
 import com.example.tasktunnel.accessibility.SanitizedNode
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class YouTubeSurfaceDetectorTest {
-    @Test fun strongShortsSignals() = assertSurface(
+    @Test fun shortsPairIsStrong() = assertDetection(
         YouTubeSurface.YOUTUBE_SHORTS,
-        node("com.google.android.youtube:id/shorts_player"),
-        node("reel_player_page"),
+        0.95,
+        node("com.google.android.youtube:id/reel_recycler"),
+        node("reel_player_page_container"),
     )
 
-    @Test fun normalVideoSignals() = assertSurface(
-        YouTubeSurface.YOUTUBE_VIDEO,
-        node("watch_player"), node("player_view"),
+    @Test fun shortsPairRemainsStrongWithProgressBar() = assertDetection(
+        YouTubeSurface.YOUTUBE_SHORTS,
+        0.95,
+        node("reel_recycler"),
+        node("reel_player_page_container"),
+        node("reel_progress_bar"),
     )
 
-    @Test fun videoIdWithVisibleSeekBarStructure() = assertSurface(
-        YouTubeSurface.YOUTUBE_VIDEO,
-        node("watch_player"), node(className = "android.widget.SeekBar", visibleToUser = true),
+    @Test fun eachShortsIdAloneFailsOpen() {
+        assertDetection(YouTubeSurface.UNKNOWN, 0.0, node("reel_recycler"))
+        assertDetection(YouTubeSurface.UNKNOWN, 0.0, node("reel_player_page_container"))
+    }
+
+    @Test fun timeBarAloneFailsOpen() = assertDetection(YouTubeSurface.UNKNOWN, 0.0, node("reel_time_bar"))
+
+    @Test fun pivotBarAloneIsOther() = assertDetection(YouTubeSurface.YOUTUBE_OTHER, 0.6, node("pivot_bar"))
+
+    @Test fun genericPlaybackAndShellIdsAreOtherNotShorts() = assertDetection(
+        YouTubeSurface.YOUTUBE_OTHER,
+        0.6,
+        node("reel_time_bar"),
+        node("pivot_bar"),
+        node("toolbar"),
     )
 
-    @Test fun searchSignals() = assertSurface(
+    @Test fun homeLikeShellIsOther() = assertDetection(
+        YouTubeSurface.YOUTUBE_OTHER,
+        0.6,
+        node("pivot_bar"),
+        node("toolbar"),
+    )
+
+    @Test fun physicalSearchSignalsRemainSearch() = assertDetection(
         YouTubeSurface.YOUTUBE_SEARCH,
-        node("search_edit_text"), node("search_results"),
+        0.8,
+        node("search_query"),
+        node(editable = true, visibleToUser = true),
     )
 
-    @Test fun searchIdWithVisibleEditableStructure() = assertSurface(
-        YouTubeSurface.YOUTUBE_SEARCH,
-        node("search_query"), node(editable = true, visibleToUser = true),
+    @Test fun longVideoSignalsRemainVideo() = assertDetection(
+        YouTubeSurface.YOUTUBE_VIDEO,
+        0.8,
+        node("watch_player"),
+        node(className = "android.widget.SeekBar", visibleToUser = true),
     )
 
-    @Test fun conflictingSpecializedEvidenceFailsOpen() = assertSurface(
+    @Test fun conflictingSpecializedEvidenceFailsOpen() = assertDetection(
         YouTubeSurface.UNKNOWN,
-        node("shorts_player"), node("reel_player_page"), node("watch_player"), node("player_view"),
+        0.0,
+        node("reel_recycler"), node("reel_player_page_container"), node("watch_player"), node("player_view"),
     )
 
-    @Test fun oneWeakShortsTokenFailsOpen() = assertSurface(YouTubeSurface.UNKNOWN, node("reel_player_page"))
+    @Test fun normalizedIdMustBeAnExactSegment() = assertDetection(
+        YouTubeSurface.UNKNOWN,
+        0.0,
+        node("com.google.android.youtube:id/not_reel_recycler"),
+        node("com.google.android.youtube:id/not_reel_player_page_container"),
+    )
 
     @Test fun nonYouTubePackageFailsOpen() {
-        val result = YouTubeSurfaceDetector.detect("com.instagram.android", listOf(node("shorts_player"), node("reel_player_page")))
+        val result = YouTubeSurfaceDetector.detect(
+            "com.instagram.android",
+            listOf(node("reel_recycler"), node("reel_player_page_container")),
+        )
         assertEquals(YouTubeSurface.UNKNOWN, result.surface)
         assertEquals(0.0, result.confidence, 0.0)
     }
 
-    @Test fun knownGenericShellIsOther() = assertSurface(YouTubeSurface.YOUTUBE_OTHER, node("bottom_bar"))
-
-    private fun assertSurface(expected: YouTubeSurface, vararg nodes: SanitizedNode) {
+    private fun assertDetection(expected: YouTubeSurface, expectedConfidence: Double, vararg nodes: SanitizedNode) {
         val result = YouTubeSurfaceDetector.detect(YouTubeSurfaceDetector.YOUTUBE_PACKAGE, nodes.toList())
         assertEquals(expected, result.surface)
-        if (expected == YouTubeSurface.UNKNOWN) assertEquals(0.0, result.confidence, 0.0)
-        else assertTrue(result.confidence > 0.0)
+        assertEquals(expectedConfidence, result.confidence, 0.0)
     }
 
     private fun node(

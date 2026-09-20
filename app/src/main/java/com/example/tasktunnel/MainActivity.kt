@@ -1,6 +1,8 @@
 package com.example.tasktunnel
 
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -31,9 +33,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.tasktunnel.accessibility.AccessibilityRuntime
 import com.example.tasktunnel.accessibility.AccessibilityState
+import com.example.tasktunnel.accessibility.ObservedInstagramDetection
 import com.example.tasktunnel.accessibility.ObservedYouTubeDetection
 import com.example.tasktunnel.accessibility.SanitizedNode
 import com.example.tasktunnel.ui.theme.TaskTunnelTheme
@@ -51,7 +55,14 @@ class MainActivity : ComponentActivity() {
                 val runtime by AccessibilityRuntime.state.collectAsState()
                 var inspectorOpen by remember { mutableStateOf(false) }
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
-                    if (inspectorOpen && BuildConfig.DEBUG) {
+                    if (!BuildConfig.DEBUG) {
+                        TaskTunnelHome(
+                            runtime.connected,
+                            serviceEnabled,
+                            { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                            Modifier.padding(padding),
+                        )
+                    } else if (inspectorOpen) {
                         InspectorScreen(runtime, { inspectorOpen = false }, Modifier.padding(padding))
                     } else {
                         DeveloperScreen(
@@ -76,6 +87,29 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+private fun TaskTunnelHome(
+    serviceConnected: Boolean,
+    enabledInSettings: Boolean,
+    openSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier.fillMaxSize().padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Task Tunnel", style = MaterialTheme.typography.headlineSmall)
+        Text("Open Instagram or YouTube to choose what you came to do.")
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Accessibility setting: ${if (enabledInSettings) "Enabled" else "Disabled"}")
+                Text("Service: ${if (serviceConnected) "Active" else "Disconnected"}")
+            }
+        }
+        Button(onClick = openSettings) { Text("Open accessibility settings") }
+    }
+}
+
+@Composable
 private fun DeveloperScreen(
     runtime: AccessibilityState,
     enabledInSettings: Boolean,
@@ -84,7 +118,7 @@ private fun DeveloperScreen(
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("Task Tunnel — M1 developer proof", style = MaterialTheme.typography.headlineSmall) }
+        item { Text("Task Tunnel — developer diagnostics", style = MaterialTheme.typography.headlineSmall) }
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -101,6 +135,22 @@ private fun DeveloperScreen(
             DetectionCard(current ?: runtime.lastYouTubeDetection, current != null)
         }
         if (BuildConfig.DEBUG) {
+            item {
+                FingerprintCopyAction(
+                    label = "Copy sanitized YouTube fingerprint",
+                    fingerprint = (runtime.currentYouTubeDetection ?: runtime.lastYouTubeDetection)?.fingerprint,
+                )
+            }
+            item {
+                val current = runtime.currentInstagramDetection
+                InstagramDiagnosticCard(current ?: runtime.lastInstagramDetection, current != null)
+            }
+            item {
+                FingerprintCopyAction(
+                    label = "Copy sanitized Instagram fingerprint",
+                    fingerprint = (runtime.currentInstagramDetection ?: runtime.lastInstagramDetection)?.fingerprint,
+                )
+            }
             item { Button(onClick = openInspector, enabled = runtime.connected) { Text("Open sanitized inspector") } }
             item {
                 Button(onClick = { AccessibilityRuntime.requestTestOverlay() }, enabled = runtime.connected && !runtime.overlayPending) {
@@ -113,6 +163,52 @@ private fun DeveloperScreen(
         if (runtime.packageHistory.isEmpty()) item { Text("None observed") }
         items(runtime.packageHistory) { transition ->
             Text("${transition.packageName} — ${formatTime(transition.observedAtMillis)}")
+        }
+    }
+}
+
+@Composable
+private fun FingerprintCopyAction(label: String, fingerprint: String?) {
+    val context = LocalContext.current
+    var copied by remember(fingerprint) { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Button(
+            enabled = fingerprint != null,
+            onClick = {
+                fingerprint ?: return@Button
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Sanitized diagnostic", fingerprint))
+                copied = true
+            },
+        ) {
+            Text(if (copied) "Sanitized fingerprint copied" else label)
+        }
+        Text(
+            "Contains no text or content descriptions. Copying intentionally places this diagnostic in Android's system clipboard, which may retain it outside Task Tunnel.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun InstagramDiagnosticCard(observed: ObservedInstagramDetection?, current: Boolean) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                if (current) "Current observed Instagram diagnostic" else "Last observed Instagram diagnostic",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (observed == null) {
+                Text("No Instagram tree captured this service session.")
+            } else {
+                Text("Surface: ${observed.detection.surface.name}")
+                Text("Confidence: ${(observed.detection.confidence * 100).toInt()}% evidence strength")
+                Text("Package: ${observed.packageName.ifEmpty { "Unavailable" }}")
+                Text("Captured: ${formatTime(observed.capturedAtMillis)}")
+                Text("Strongest sanitized signals:")
+                if (observed.detection.strongestSignals.isEmpty()) Text("None")
+                observed.detection.strongestSignals.forEach { Text("• $it") }
+            }
         }
     }
 }
@@ -183,7 +279,8 @@ private fun NodeRow(node: SanitizedNode) {
             Text(node.resourceId ?: "no resource ID", style = MaterialTheme.typography.bodySmall)
             Text(
                 "children=${node.childCount} clickable=${node.clickable} scrollable=${node.scrollable} " +
-                    "editable=${node.editable} enabled=${node.enabled} visible=${node.visibleToUser}",
+                    "editable=${node.editable} selected=${node.selected} enabled=${node.enabled} visible=${node.visibleToUser} " +
+                    "parent=${node.parentIndex ?: "none"}",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

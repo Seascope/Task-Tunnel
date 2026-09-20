@@ -30,7 +30,7 @@ object YouTubeSurfaceDetector {
     private const val MAX_SIGNALS = 5
 
     private val shortsIds = setOf(
-        "reel_watch_player", "shorts_player", "reel_player_page", "shorts_video_cell",
+        "reel_recycler", "reel_player_page_container",
     )
     private val videoIds = setOf(
         "watch_player", "player_view", "player_fragment_container", "video_player",
@@ -57,9 +57,9 @@ object YouTubeSurfaceDetector {
         val hasEditableStructure = nodes.any { it.editable && it.visibleToUser }
         val hasSeekBarStructure = nodes.any { it.className?.endsWith("SeekBar") == true && it.visibleToUser }
 
-        // The sanitized snapshot has no parent identity/selection/orientation, so a generic pager
-        // cannot independently corroborate an ID. Require two Shorts-specific IDs for now.
-        val shortsStrong = shortsMatches.size >= 2
+        // This pair is the only verified Shorts signature. Generic playback and progress IDs are
+        // deliberately not evidence because they also occur outside Shorts.
+        val shortsStrong = shortsMatches.size == shortsIds.size
         val videoStrong = videoMatches.size >= 2 || (videoMatches.isNotEmpty() && hasSeekBarStructure)
         val searchStrong = searchMatches.size >= 2 || (searchMatches.isNotEmpty() && hasEditableStructure)
         val specializedCount = listOf(shortsStrong, videoStrong, searchStrong).count { it }
@@ -73,7 +73,7 @@ object YouTubeSurfaceDetector {
         }
         if (shortsStrong) return result(
             YouTubeSurface.YOUTUBE_SHORTS,
-            if (shortsMatches.size >= 2) 0.95 else 0.85,
+            0.95,
             signalList(shortsMatches, emptyList(), emptyList(), hasPagerStructure, false, false),
         )
         if (videoStrong) return result(
