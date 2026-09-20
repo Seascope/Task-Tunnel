@@ -14,14 +14,18 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -35,11 +39,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.tasktunnel.accessibility.AccessibilityRuntime
 import com.example.tasktunnel.accessibility.AccessibilityState
 import com.example.tasktunnel.accessibility.ObservedInstagramDetection
 import com.example.tasktunnel.accessibility.ObservedYouTubeDetection
 import com.example.tasktunnel.accessibility.SanitizedNode
+import com.example.tasktunnel.attention.AttentionEpisode
+import com.example.tasktunnel.attention.AttentionUiState
+import com.example.tasktunnel.attention.AttentionViewModel
+import com.example.tasktunnel.attention.episodeSubtitle
+import com.example.tasktunnel.attention.episodeTitle
+import com.example.tasktunnel.attention.eventDescription
+import com.example.tasktunnel.attention.taskLabel
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.drift.DriftPoolPreferences
 import com.example.tasktunnel.ui.theme.TaskTunnelTheme
@@ -55,7 +67,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             TaskTunnelTheme {
                 val runtime by AccessibilityRuntime.state.collectAsState()
-                var inspectorOpen by remember { mutableStateOf(false) }
+                val attentionViewModel: AttentionViewModel = viewModel()
+                val attention by attentionViewModel.uiState.collectAsState()
+                var destination by remember { mutableStateOf(MainDestination.ATTENTION) }
+                var selectedEpisodeId by remember { mutableStateOf<String?>(null) }
                 var selectedDriftPackages by remember {
                     mutableStateOf(DriftPoolPreferences.load(this@MainActivity))
                 }
@@ -69,25 +84,46 @@ class MainActivity : ComponentActivity() {
                     AccessibilityRuntime.setDriftPool(selectedDriftPackages)
                 }
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
-                    if (!BuildConfig.DEBUG) {
-                        TaskTunnelHome(
+                    when (destination) {
+                        MainDestination.ATTENTION -> AttentionScreen(
+                            uiState = attention,
+                            runtime = runtime,
+                            openEpisode = {
+                                selectedEpisodeId = it.id
+                                destination = MainDestination.EPISODE
+                            },
+                            openProtection = { destination = MainDestination.PROTECTION },
+                            openDeveloper = { destination = MainDestination.DEVELOPER },
+                            modifier = Modifier.padding(padding),
+                        )
+                        MainDestination.EPISODE -> EpisodeDetailScreen(
+                            episode = attention.episodes.firstOrNull { it.id == selectedEpisodeId },
+                            goBack = { destination = MainDestination.ATTENTION },
+                            modifier = Modifier.padding(padding),
+                        )
+                        MainDestination.PROTECTION -> TaskTunnelHome(
                             runtime.connected,
                             serviceEnabled,
                             { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                             selectedDriftPackages,
                             setDriftAppEnabled,
+                            { destination = MainDestination.ATTENTION },
                             Modifier.padding(padding),
                         )
-                    } else if (inspectorOpen) {
-                        InspectorScreen(runtime, { inspectorOpen = false }, Modifier.padding(padding))
-                    } else {
-                        DeveloperScreen(
+                        MainDestination.DEVELOPER -> DeveloperScreen(
                             runtime,
                             serviceEnabled,
                             { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-                            { inspectorOpen = true },
+                            { destination = MainDestination.INSPECTOR },
                             selectedDriftPackages,
                             setDriftAppEnabled,
+                            { attentionViewModel.clearHistory() },
+                            { destination = MainDestination.ATTENTION },
+                            Modifier.padding(padding),
+                        )
+                        MainDestination.INSPECTOR -> InspectorScreen(
+                            runtime,
+                            { destination = MainDestination.DEVELOPER },
                             Modifier.padding(padding),
                         )
                     }
@@ -104,6 +140,131 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private enum class MainDestination { ATTENTION, EPISODE, PROTECTION, DEVELOPER, INSPECTOR }
+
+@Composable
+private fun AttentionScreen(
+    uiState: AttentionUiState,
+    runtime: AccessibilityState,
+    openEpisode: (AttentionEpisode) -> Unit,
+    openProtection: () -> Unit,
+    openDeveloper: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier.fillMaxSize().padding(horizontal = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Spacer(Modifier.height(12.dp))
+            Text("Attention", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                if (runtime.connected) "Protection active" else "Protection status unavailable",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        runtime.tunnelState.activeSession?.let { session ->
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Active Task Tunnel", style = MaterialTheme.typography.labelLarge)
+                        Text(session.app.displayName, style = MaterialTheme.typography.titleMedium)
+                        Text(taskLabel(session.task), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = openProtection) { Text("Protection") }
+                if (BuildConfig.DEBUG) OutlinedButton(onClick = openDeveloper) { Text("Developer diagnostics") }
+            }
+        }
+        item { Text("Recent episodes", style = MaterialTheme.typography.titleLarge) }
+        if (uiState.episodes.isEmpty()) {
+            item {
+                Column(Modifier.fillMaxWidth().padding(vertical = 28.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Your attention history will appear here as you use Task Tunnel.")
+                    Text(
+                        "You’ll see intentions, meaningful transitions, check-ins, and your choices — stored only on this device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        } else {
+            items(uiState.episodes, key = { it.id }) { episode ->
+                Card(onClick = { openEpisode(episode) }, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(episodeTitle(episode), style = MaterialTheme.typography.titleMedium)
+                            Text(formatTime(episode.startedAtMillis), style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text(episodeSubtitle(episode), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            formatEpisodeRange(episode),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            item {
+                Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Last seven days", style = MaterialTheme.typography.titleSmall)
+                    Text("${uiState.metrics.driftEpisodesLastSevenDays} Drift episodes")
+                    Text(
+                        "A quiet count of check-ins, not a score.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun EpisodeDetailScreen(
+    episode: AttentionEpisode?,
+    goBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier.fillMaxSize().padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item { OutlinedButton(onClick = goBack) { Text("Back to Attention") } }
+        if (episode == null) {
+            item { Text("This episode is no longer in recent history.") }
+        } else {
+            item {
+                Text(episodeTitle(episode), style = MaterialTheme.typography.headlineSmall)
+                Text(episodeSubtitle(episode), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(formatEpisodeRange(episode), style = MaterialTheme.typography.bodySmall)
+            }
+            items(episode.events, key = { "${it.id}:${it.timestampMillis}:${it.subtype}" }) { event ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text(formatTime(event.timestampMillis), style = MaterialTheme.typography.labelMedium)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(eventDescription(event))
+                        HorizontalDivider()
+                    }
+                }
+            }
+            item {
+                Text(
+                    "This history stays on this device.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun TaskTunnelHome(
     serviceConnected: Boolean,
@@ -111,13 +272,15 @@ private fun TaskTunnelHome(
     openSettings: () -> Unit,
     selectedDriftPackages: Set<String>,
     setDriftAppEnabled: (String, Boolean) -> Unit,
+    goBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
         modifier.fillMaxSize().padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Task Tunnel", style = MaterialTheme.typography.headlineSmall)
+        OutlinedButton(onClick = goBack) { Text("Back to Attention") }
+        Text("Protection", style = MaterialTheme.typography.headlineSmall)
         Text("Open Instagram or YouTube to choose what you came to do.")
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -138,9 +301,12 @@ private fun DeveloperScreen(
     openInspector: () -> Unit,
     selectedDriftPackages: Set<String>,
     setDriftAppEnabled: (String, Boolean) -> Unit,
+    clearAttentionHistory: () -> Unit,
+    goBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { OutlinedButton(onClick = goBack) { Text("Back to Attention") } }
         item { Text("Task Tunnel — developer diagnostics", style = MaterialTheme.typography.headlineSmall) }
         item {
             Card(Modifier.fillMaxWidth()) {
@@ -153,6 +319,7 @@ private fun DeveloperScreen(
             }
         }
         item { Button(onClick = openSettings) { Text("Open accessibility settings") } }
+        item { OutlinedButton(onClick = clearAttentionHistory) { Text("Clear Attention history") } }
         item { DriftPoolCard(selectedDriftPackages, setDriftAppEnabled) }
         item {
             val current = runtime.currentYouTubeDetection
@@ -337,3 +504,9 @@ private fun NodeRow(node: SanitizedNode) {
 }
 
 private fun formatTime(timeMillis: Long): String = DateFormat.getTimeInstance().format(Date(timeMillis))
+
+private fun formatEpisodeRange(episode: AttentionEpisode): String {
+    val start = formatTime(episode.startedAtMillis)
+    val end = formatTime(episode.endedAtMillis)
+    return if (start == end) start else "$start – $end"
+}

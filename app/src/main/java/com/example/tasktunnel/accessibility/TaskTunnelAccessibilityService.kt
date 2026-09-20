@@ -18,6 +18,9 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.TextView
 import com.example.tasktunnel.BuildConfig
+import com.example.tasktunnel.attention.AttentionDecision
+import com.example.tasktunnel.attention.AttentionHistory
+import com.example.tasktunnel.attention.AttentionSubtype
 import com.example.tasktunnel.detector.InstagramSurfaceDetector
 import com.example.tasktunnel.detector.InstagramSurface
 import com.example.tasktunnel.detector.YouTubeSurfaceDetector
@@ -33,12 +36,14 @@ import com.example.tasktunnel.tunnel.SupportedApp
 import com.example.tasktunnel.tunnel.TunnelCoordinator
 import com.example.tasktunnel.tunnel.TunnelPrompt
 import com.example.tasktunnel.tunnel.TunnelTask
+import com.example.tasktunnel.tunnel.TunnelStatus
 import java.util.ArrayDeque
 
 class TaskTunnelAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val tunnelCoordinator = TunnelCoordinator()
     private val driftCoordinator = DriftCoordinator(DriftAppCatalog.knownPackages)
+    private val attentionRecorder by lazy { AttentionHistory.recorder(applicationContext) }
     private var testOverlayView: LinearLayout? = null
     private var tunnelOverlayView: LinearLayout? = null
     private var driftOverlayView: LinearLayout? = null
@@ -308,10 +313,18 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 )
             }
             detection?.let {
-                tunnelCoordinator.observeSurface(it.surface.toTunnelSurface(), capturedAt)
+                val surface = it.surface.toTunnelSurface()
+                tunnelCoordinator.state.activeSession
+                    ?.takeIf { session -> session.status == TunnelStatus.ACTIVE && session.app.packageName == packageName }
+                    ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
+                tunnelCoordinator.observeSurface(surface, capturedAt)
             }
             instagramDetection?.let {
-                tunnelCoordinator.observeSurface(it.surface.toTunnelSurface(), capturedAt)
+                val surface = it.surface.toTunnelSurface()
+                tunnelCoordinator.state.activeSession
+                    ?.takeIf { session -> session.status == TunnelStatus.ACTIVE && session.app.packageName == packageName }
+                    ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
+                tunnelCoordinator.observeSurface(surface, capturedAt)
             }
             updateTunnelUi()
         } catch (_: RuntimeException) {
@@ -436,6 +449,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             getSystemService(WindowManager::class.java).addView(layout, params)
             tunnelOverlayView = layout
             shownTunnelPrompt = prompt
+            attentionRecorder.tunnelPromptShown(
+                prompt = prompt,
+                session = tunnelCoordinator.state.activeSession,
+                nowMillis = System.currentTimeMillis(),
+            )
         } catch (_: RuntimeException) {
             tunnelOverlayView = null
             shownTunnelPrompt = null
@@ -476,6 +494,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             getSystemService(WindowManager::class.java).addView(layout, params)
             driftOverlayView = layout
             driftCoordinator.markCheckInShown(episode.id)
+            attentionRecorder.driftCheckInShown(episode, System.currentTimeMillis())
         } catch (_: RuntimeException) {
             driftOverlayView = null
         }
@@ -485,12 +504,26 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         addView(overlayText("Looking for something?", heading = true))
         addView(overlayText("You've moved between ${humanReadableList(labels)} in under a minute."))
         addView(overlayButton("Set an intention") {
+            attentionRecorder.driftDecision(
+                episode = episode,
+                subtype = AttentionSubtype.SET_INTENTION,
+                decision = AttentionDecision.SET_INTENTION,
+                foregroundPackage = driftCoordinator.foregroundPackage,
+                nowMillis = System.currentTimeMillis(),
+            )
             val app = driftCoordinator.setAnIntention(episode.id)
             removeDriftOverlay()
             if (app != null) tunnelCoordinator.requestPurposeGate(app)
             updateTunnelUi()
         })
         addView(overlayButton("Keep going") {
+            attentionRecorder.driftDecision(
+                episode = episode,
+                subtype = AttentionSubtype.KEEP_GOING,
+                decision = AttentionDecision.KEEP_GOING,
+                foregroundPackage = driftCoordinator.foregroundPackage,
+                nowMillis = System.currentTimeMillis(),
+            )
             driftCoordinator.keepGoing(episode.id)
             removeDriftOverlay()
             updateTunnelUi()
@@ -548,17 +581,47 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         addView(overlayText(taskReminder(prompt.task), heading = true))
         addView(overlayText("${surfaceLabel(prompt.surface)} is outside this Task Tunnel."))
         addView(overlayButton("Return") {
-            if (tunnelCoordinator.returnFromIntervention(System.currentTimeMillis())) {
+            val session = tunnelCoordinator.state.activeSession
+            val nowMillis = System.currentTimeMillis()
+            if (tunnelCoordinator.returnFromIntervention(nowMillis)) {
+                session?.let {
+                    attentionRecorder.tunnelDecision(
+                        it,
+                        AttentionSubtype.RETURN,
+                        AttentionDecision.RETURN,
+                        nowMillis,
+                        prompt.surface,
+                    )
+                }
                 updateTunnelUi()
                 performGlobalAction(GLOBAL_ACTION_BACK)
             }
         })
         addView(overlayButton("End Tunnel") {
+            tunnelCoordinator.state.activeSession?.let {
+                attentionRecorder.tunnelDecision(
+                    it,
+                    AttentionSubtype.END_TUNNEL,
+                    AttentionDecision.END_TUNNEL,
+                    System.currentTimeMillis(),
+                    prompt.surface,
+                )
+            }
             tunnelCoordinator.endSession()
             updateTunnelUi()
         })
         addView(overlayButton("Allow anyway") {
-            tunnelCoordinator.allowAnyway(System.currentTimeMillis())
+            val nowMillis = System.currentTimeMillis()
+            tunnelCoordinator.state.activeSession?.let {
+                attentionRecorder.tunnelDecision(
+                    it,
+                    AttentionSubtype.ALLOW_ANYWAY,
+                    AttentionDecision.ALLOW_ANYWAY,
+                    nowMillis,
+                    prompt.surface,
+                )
+            }
+            tunnelCoordinator.allowAnyway(nowMillis)
             updateTunnelUi()
         })
     }
@@ -567,6 +630,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         addView(overlayText("Your Task Tunnel time is complete.", heading = true))
         addView(overlayText("What would you like to do in ${prompt.app.displayName}?"))
         addView(overlayButton("Finish") {
+            tunnelCoordinator.state.activeSession?.let {
+                attentionRecorder.tunnelDecision(
+                    it,
+                    AttentionSubtype.EXPIRY_FINISH,
+                    AttentionDecision.FINISH,
+                    System.currentTimeMillis(),
+                )
+            }
             tunnelCoordinator.endSession()
             updateTunnelUi()
         })
@@ -575,18 +646,37 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         } else {
             "Continue"
         }) {
-            tunnelCoordinator.continueExpiredSession(System.currentTimeMillis())
+            val nowMillis = System.currentTimeMillis()
+            tunnelCoordinator.state.activeSession?.let {
+                attentionRecorder.tunnelDecision(
+                    it,
+                    AttentionSubtype.EXPIRY_CONTINUE,
+                    AttentionDecision.CONTINUE,
+                    nowMillis,
+                )
+            }
+            tunnelCoordinator.continueExpiredSession(nowMillis)
             updateTunnelUi()
             scheduleCapture()
         })
         addView(overlayButton("Choose another purpose") {
+            tunnelCoordinator.state.activeSession?.let {
+                attentionRecorder.tunnelDecision(
+                    it,
+                    AttentionSubtype.EXPIRY_CHOOSE_ANOTHER,
+                    AttentionDecision.CHOOSE_ANOTHER_PURPOSE,
+                    System.currentTimeMillis(),
+                )
+            }
             tunnelCoordinator.chooseAnotherPurpose()
             updateTunnelUi()
         })
     }
 
     private fun startTunnel(task: TunnelTask, intendedDurationMillis: Long?) {
-        tunnelCoordinator.startSession(task, System.currentTimeMillis(), intendedDurationMillis)
+        val nowMillis = System.currentTimeMillis()
+        tunnelCoordinator.startSession(task, nowMillis, intendedDurationMillis)
+        tunnelCoordinator.state.activeSession?.let { attentionRecorder.purposeSelected(it, nowMillis) }
         driftCoordinator.clear()
         updateTunnelUi()
         scheduleCapture()

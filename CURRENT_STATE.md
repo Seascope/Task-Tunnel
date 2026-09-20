@@ -1,8 +1,25 @@
 # Current State
 
+## M5 Local Attention Debugger
+
+Status: automated implementation is complete; physical-device UX validation is pending. M6 has not started. M0 through M4 have passed physical-device validation per user confirmation.
+
+- Attention is now the default main-app destination. It leads with a chronological list of recent Task Tunnel and Drift episodes, opens a natural-language detail timeline, shows a quiet active-Tunnel context when applicable, and keeps the existing Protection/setup and debug diagnostics reachable without introducing the full M6 navigation system.
+- A minimal Room v1 database persists structured semantic events only. The schema stores timestamp, event family, semantic subtype, known app, known surface, declared task, Tunnel ID, Drift episode ID, decision, and known involved apps. It never accepts accessibility text, message content, usernames, screenshots, raw trees, resource IDs, node classes, fingerprints, confidence, or raw AccessibilityEvents.
+- The explicit event families are **Intent**, **Transition**, **Intervention**, and **Decision**. Presentation copy is generated from structured enum-backed data instead of storing complete user-facing sentences.
+- The AccessibilityService records only meaningful state boundaries: purpose selection/session start, recognized Messages/Reels/Explore/Search/Video/Shorts changes, surface interventions when actually shown, Return/Allow Anyway/End Tunnel, session-expiry intervention and Finish/Continue/Choose another purpose, Drift sequence/check-in, and Keep going/Set an intention.
+- A pure semantic filter suppresses repeated observations of the same surface and ignores `UNKNOWN` and generic/other surfaces. Recording uses a single serialized coroutine IO lane and never blocks AccessibilityService event handling.
+- Events sharing a Tunnel ID group into one Task Tunnel episode. Events sharing a Drift episode ID group into one Drift episode with its ordered human-readable app sequence. Unrelated IDs stay separate.
+- The Attention detail screen presents time plus natural descriptions of intention, transitions, interventions, and decisions. Normal UI uses Instagram, YouTube, and Reddit labels only; it never exposes package identifiers or detector internals.
+- The only rolling metric is a quiet distinct Drift-episode count for the last seven days. No focus/productivity score, grade, streak, XP, raw screen-time hero, or override-failure metric was added.
+- Empty history explains that intentions, meaningful transitions, check-ins, and choices will appear locally over time. Debug builds provide a separate **Clear Attention history** action for physical testing.
+- Focused JVM tests cover structured intent, meaningful/deduplicated surface transitions, fail-open/noise handling, intervention deduplication, Return/Allow Anyway/End and all expiry decisions, Drift sequence/check-in/decisions, forbidden diagnostic fields, Tunnel/Drift grouping, unrelated episodes, weekly Drift metrics, and empty history.
+- The Room instrumentation test persists an event, closes and reopens the on-device database, reloads it, clears it, and verifies the database is empty. `MANUAL_TEST_M5.md` contains the full physical timeline, persistence, noise, privacy, active-Tunnel, Drift, and clear-history matrix.
+- All 13 focused M5 JVM tests pass; the focused Room instrumentation test passes on the connected Android 16 device; the complete debug JVM suite passes 94 tests with zero failures; `:app:assembleDebug` passes; and `git diff --check` reports no whitespace errors. APK: `app\build\outputs\apk\debug\app-debug.apk`.
+
 ## M4 MVP Drift Detection
 
-Status: automated implementation is complete; physical-device validation is pending. M5 has not started.
+Status: complete, including user-confirmed physical-device validation. M5 preserves the validated detector, episode, intervention-priority, and choice behavior.
 
 - Drift Detection now operates on foreground package transitions only. The pure in-memory detector ignores repeated observations from the same package, excludes non-selected apps from the qualifying count, keeps a bounded 24-transition rolling window, and stores no app content.
 - Central beta policy values are three distinct selected apps within 60 seconds, followed by a 60-second quiet period before a new episode can form. These are explicit `DriftPolicy` defaults rather than scattered literals.
@@ -13,7 +30,7 @@ Status: automated implementation is complete; physical-device validation is pend
 - Accessibility-service restart and Drift-pool changes clear transient detector and episode state. All runtime Drift state is in memory; only the user's selected pool is persisted locally.
 - Focused tests cover threshold/window behavior, repeated and non-selected packages, one check-in per episode, acknowledgement, quiet reset/new episode, supported and unsupported Set an intention routing, active-Tunnel suppression, overlay priority, unrelated-app behavior, and restart semantics.
 - All 18 focused Drift tests pass; all 24 M3/M3.1 policy and coordinator regression tests pass; the complete debug JVM suite passes 81 tests with zero failures; `:app:assembleDebug` passes; and `git diff --check` reports no whitespace errors. APK: `app\build\outputs\apk\debug\app-debug.apk`.
-- `MANUAL_TEST_M4.md` contains the physical positive, Keep Going, Set an intention, pool, slow-switching, existing-Tunnel, overlay-priority, lifecycle, and privacy matrix.
+- `MANUAL_TEST_M4.md` contains the completed physical positive, Keep Going, Set an intention, pool, slow-switching, existing-Tunnel, overlay-priority, lifecycle, and privacy matrix.
 
 ## M3.1 Task Tunnel timing alignment
 
