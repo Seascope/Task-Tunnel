@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">TaskTunnel</string>
+    <string name="accessibility_service_label">Task Tunnel developer service</string>
+    <string name="accessibility_service_description">Developer-only feasibility spike for foreground observation, sanitized inspection, and a test overlay.</string>
+</resources>
