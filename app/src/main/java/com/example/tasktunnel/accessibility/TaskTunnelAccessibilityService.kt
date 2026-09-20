@@ -8,11 +8,14 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.TextView
 import com.example.tasktunnel.BuildConfig
 import com.example.tasktunnel.detector.InstagramSurfaceDetector
@@ -38,6 +41,18 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private var lastTargetPackage: String? = null
     private val showOverlay = Runnable { showTestOverlayNow() }
     private val trailingCapture = Runnable { captureCurrentRoot() }
+    private val tunnelDeadline = object : Runnable {
+        override fun run() {
+            val nowMillis = System.currentTimeMillis()
+            val packageName = activeRootPackage()
+            if (packageName == null) {
+                handler.postDelayed(this, DEADLINE_RETRY_MS)
+            } else {
+                tunnelCoordinator.observeForeground(packageName, nowMillis)
+                updateTunnelUi()
+            }
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -63,8 +78,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) AccessibilityRuntime.clearCurrentYouTubeDetection()
         if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
         tunnelCoordinator.observeForeground(packageName, System.currentTimeMillis())
-        syncTunnelState()
-        refreshTunnelOverlay()
+        updateTunnelUi()
         if (!isWindowEvent) {
             if (shouldCapture(packageName, state.inspectionArmed)) scheduleCapture()
             return
@@ -106,6 +120,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun tearDownRuntime() {
         handler.removeCallbacks(showOverlay)
         handler.removeCallbacks(trailingCapture)
+        handler.removeCallbacks(tunnelDeadline)
         removeTestOverlay()
         removeTunnelOverlay()
         if (current === this) current = null
@@ -277,8 +292,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             instagramDetection?.let {
                 tunnelCoordinator.observeSurface(it.surface.toTunnelSurface(), capturedAt)
             }
-            syncTunnelState()
-            refreshTunnelOverlay()
+            updateTunnelUi()
         } catch (_: RuntimeException) {
             while (stack.isNotEmpty()) recycleNode(stack.removeLast().node)
             AccessibilityRuntime.clearCurrentYouTubeDetection()
@@ -356,8 +370,19 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun failOpenCurrentSurface() {
         tunnelCoordinator.observeSurface(DetectedSurface.UNKNOWN, System.currentTimeMillis())
+        updateTunnelUi()
+    }
+
+    private fun updateTunnelUi() {
         syncTunnelState()
         refreshTunnelOverlay()
+        scheduleTunnelDeadline()
+    }
+
+    private fun scheduleTunnelDeadline() {
+        handler.removeCallbacks(tunnelDeadline)
+        val deadline = tunnelCoordinator.nextDeadlineMillis() ?: return
+        handler.postDelayed(tunnelDeadline, (deadline - System.currentTimeMillis()).coerceAtLeast(0L))
     }
 
     private fun refreshTunnelOverlay() {
@@ -372,6 +397,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val layout = when (prompt) {
             is TunnelPrompt.PurposeGate -> purposeGateView(prompt)
             is TunnelPrompt.Intervention -> interventionView(prompt)
+            is TunnelPrompt.SessionExpired -> sessionExpiredView(prompt)
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -394,21 +420,42 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun purposeGateView(prompt: TunnelPrompt.PurposeGate) = baseTunnelOverlay().apply {
+        var selectedDurationMillis: Long? = null
         addView(overlayText("What did you open ${prompt.app.displayName} to do?", heading = true))
+        addView(overlayText("Optional duration"))
+        addView(RadioGroup(context).apply {
+            orientation = RadioGroup.HORIZONTAL
+            DURATION_CHOICES.forEachIndexed { index, choice ->
+                addView(RadioButton(context).apply {
+                    id = View.generateViewId()
+                    text = choice.label
+                    setTextColor(0xFFFFFFFF.toInt())
+                    isChecked = index == 0
+                    setOnClickListener { selectedDurationMillis = choice.durationMillis }
+                })
+            }
+        })
         when (prompt.app) {
             SupportedApp.INSTAGRAM -> {
-                addView(overlayButton("Reply to messages") { startTunnel(TunnelTask.INSTAGRAM_MESSAGES) })
-                addView(overlayButton("Browse intentionally") { startTunnel(TunnelTask.INSTAGRAM_BROWSE) })
+                addView(overlayButton("Reply to messages") {
+                    startTunnel(TunnelTask.INSTAGRAM_MESSAGES, selectedDurationMillis)
+                })
+                addView(overlayButton("Browse intentionally") {
+                    startTunnel(TunnelTask.INSTAGRAM_BROWSE, selectedDurationMillis)
+                })
             }
             SupportedApp.YOUTUBE -> {
-                addView(overlayButton("Search / watch something") { startTunnel(TunnelTask.YOUTUBE_SEARCH_WATCH) })
-                addView(overlayButton("Browse intentionally") { startTunnel(TunnelTask.YOUTUBE_BROWSE) })
+                addView(overlayButton("Search / watch something specific") {
+                    startTunnel(TunnelTask.YOUTUBE_SEARCH_WATCH, selectedDurationMillis)
+                })
+                addView(overlayButton("Browse intentionally") {
+                    startTunnel(TunnelTask.YOUTUBE_BROWSE, selectedDurationMillis)
+                })
             }
         }
         addView(overlayButton("Not now") {
             tunnelCoordinator.dismissPurposeGate()
-            syncTunnelState()
-            refreshTunnelOverlay()
+            updateTunnelUi()
         })
     }
 
@@ -417,27 +464,45 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         addView(overlayText("${surfaceLabel(prompt.surface)} is outside this Task Tunnel."))
         addView(overlayButton("Return") {
             if (tunnelCoordinator.returnFromIntervention(System.currentTimeMillis())) {
-                syncTunnelState()
-                refreshTunnelOverlay()
+                updateTunnelUi()
                 performGlobalAction(GLOBAL_ACTION_BACK)
             }
         })
         addView(overlayButton("End Tunnel") {
             tunnelCoordinator.endSession()
-            syncTunnelState()
-            refreshTunnelOverlay()
+            updateTunnelUi()
         })
         addView(overlayButton("Allow anyway") {
-            tunnelCoordinator.allowAnyway()
-            syncTunnelState()
-            refreshTunnelOverlay()
+            tunnelCoordinator.allowAnyway(System.currentTimeMillis())
+            updateTunnelUi()
         })
     }
 
-    private fun startTunnel(task: TunnelTask) {
-        tunnelCoordinator.startSession(task, System.currentTimeMillis())
-        syncTunnelState()
-        refreshTunnelOverlay()
+    private fun sessionExpiredView(prompt: TunnelPrompt.SessionExpired) = baseTunnelOverlay().apply {
+        addView(overlayText("Your Task Tunnel time is complete.", heading = true))
+        addView(overlayText("What would you like to do in ${prompt.app.displayName}?"))
+        addView(overlayButton("Finish") {
+            tunnelCoordinator.endSession()
+            updateTunnelUi()
+        })
+        addView(overlayButton(if (prompt.task == TunnelTask.INSTAGRAM_BROWSE || prompt.task == TunnelTask.YOUTUBE_BROWSE) {
+            "Keep browsing"
+        } else {
+            "Continue"
+        }) {
+            tunnelCoordinator.continueExpiredSession(System.currentTimeMillis())
+            updateTunnelUi()
+            scheduleCapture()
+        })
+        addView(overlayButton("Choose another purpose") {
+            tunnelCoordinator.chooseAnotherPurpose()
+            updateTunnelUi()
+        })
+    }
+
+    private fun startTunnel(task: TunnelTask, intendedDurationMillis: Long?) {
+        tunnelCoordinator.startSession(task, System.currentTimeMillis(), intendedDurationMillis)
+        updateTunnelUi()
         scheduleCapture()
     }
 
@@ -517,11 +582,20 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         private const val MAX_HISTORY = 8
         private const val MAX_FIELD_LENGTH = 200
         private const val CAPTURE_THROTTLE_MS = 1_000L
+        private const val DEADLINE_RETRY_MS = 1_000L
         private const val OVERLAY_DELAY_MS = 3_000L
         private const val OVERLAY_TOP_OFFSET_PX = 72
         private const val OVERLAY_PADDING_PX = 32
         private const val OVERLAY_ITEM_GAP_PX = 12
         private const val OVERLAY_CORNER_RADIUS_PX = 24f
         private const val OVERLAY_ELEVATION_PX = 12f
+        private val DURATION_CHOICES = listOf(
+            DurationChoice("No limit", null),
+            DurationChoice("5 min", 5 * 60_000L),
+            DurationChoice("10 min", 10 * 60_000L),
+            DurationChoice("20 min", 20 * 60_000L),
+        )
     }
+
+    private data class DurationChoice(val label: String, val durationMillis: Long?)
 }

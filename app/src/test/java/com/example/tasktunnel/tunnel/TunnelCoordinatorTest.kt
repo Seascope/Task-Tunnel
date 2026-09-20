@@ -23,12 +23,12 @@ class TunnelCoordinatorTest {
     }
 
     @Test
-    fun allowAnywaySuppressesRepeatedSurfaceUntilAConfidentTransition() {
+    fun allowAnywaySuppressesRepeatedSurfaceForTemporaryAllowance() {
         val coordinator = activeInstagramMessagesCoordinator()
         coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
         assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
 
-        coordinator.allowAnyway()
+        coordinator.allowAnyway(10)
         assertTrue(coordinator.state.activeSession?.overrideOccurred == true)
         coordinator.observeSurface(DetectedSurface.UNKNOWN, 11)
         coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 12)
@@ -36,7 +36,7 @@ class TunnelCoordinatorTest {
 
         coordinator.observeSurface(DetectedSurface.INSTAGRAM_MESSAGES, 13)
         coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 14)
-        assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
+        assertNull(coordinator.state.prompt)
     }
 
     @Test

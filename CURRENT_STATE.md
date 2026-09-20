@@ -1,19 +1,32 @@
 # Current State
 
+## M3.1 Task Tunnel timing alignment
+
+Status: automated implementation is complete; physical-device validation is pending. M4 has not started.
+
+- **Allow anyway** now creates a temporary allowance scoped to the current Tunnel ID and incompatible surface. The beta allowance is an explicit coordinator policy value of five minutes. Allowed-surface navigation and brief app switches do not cancel it; another incompatible surface does not inherit it; the next incompatible detection after expiry may intervene again.
+- Active Tunnels now survive a short switch away from their protected app. The beta quick-return grace is an explicit coordinator policy value of 60 seconds. Returning inside grace resumes the same Tunnel without a Purpose Gate; grace expiry clears it silently, and the next protected-app foreground visit receives a fresh gate. Explicit End Tunnel and accessibility-service restart still clear state immediately.
+- The Purpose Gate offers **No limit**, **5 min**, **10 min**, and **20 min** as optional duration choices while retaining the two existing, equally presented task choices for each supported app. No limit remains the default, including for intentional browsing.
+- A timed Tunnel derives its expiry from its start time and selected duration. Foreground expiry shows a neutral re-decision with **Finish**, **Continue**, and **Choose another purpose**. Finish ends the Tunnel without closing the host app; Continue starts a fresh window of the same duration; Choose another purpose returns to the Purpose Gate.
+- Timed expiry while the protected app is backgrounded ends silently. The service schedules only the next coordinator deadline and verifies the current active-root package before applying it, so expiry and grace do not place Task Tunnel UI over an unrelated app.
+- Timing remains in the pure `TunnelCoordinator`; detector classification and `SessionPolicy` rules are unchanged. `UNKNOWN` continues to fail open, and normal user UI still excludes diagnostic details.
+- Focused M3.1 tests cover allowance scope/expiry, quick return, explicit end/service-reset semantics, unrelated-app behavior, optional/no-limit duration, foreground expiry decisions, silent background expiry, and deadline selection. All 24 focused coordinator/policy tests pass; the complete debug JVM suite passes 63 tests; and `:app:assembleDebug` passes. Physical M3.1 validation remains pending.
+- `MANUAL_TEST_M3_1.md` contains the physical Allow Anyway, quick-return, timed-session, background-expiry, fail-open, and privacy matrix.
+
 ## M3 Task Tunnel interaction
 
-Status: automated implementation is complete; physical-device validation is pending.
+Status: complete, including user-confirmed physical-device validation. M3.1 supersedes the original allowance lifetime and adds grace/session-window behavior without changing the validated detector and policy flow.
 
 - Added a pure local session model with a unique ID, target app, selected task, start time, optional intended duration, active status, and an override-occurrence marker. One in-memory session is owned by the accessibility-service process; a service restart intentionally clears it and returns to a safe Purpose Gate on the next supported-app foreground visit.
 - Purpose Gates appear once per supported-app foreground visit when no applicable Tunnel exists. Instagram offers **Reply to messages** and **Browse intentionally**; YouTube offers **Search / watch something** and **Browse intentionally**. **Not now** dismisses the gate until the app leaves and returns.
 - Detector outputs are adapted to a neutral surface enum before a separate deterministic policy evaluates them. Instagram Messages allows Messages and intervenes on Reels/Explore. YouTube Search/Watch allows Search/Video and intervenes on Shorts. Intentional Browse allows the selected app's known surfaces. `UNKNOWN` and app/surface mismatches fail open.
 - Confident incompatible surfaces show a user-facing accessibility overlay with **Return**, **End Tunnel**, and **Allow anyway**. Return dismisses first, applies a two-second stale-event cooldown for the exact session/surface, and then attempts one Android global Back action. It does not perform autonomous navigation.
-- Allow Anyway records that an override occurred and suppresses the same surface for the current Tunnel until a confidently different surface is observed. Unknown detector frames preserve that override instead of creating a prompt loop. End Tunnel clears active policy and prompt state without closing the supported app or immediately reopening the Purpose Gate.
+- At the M3 checkpoint, Allow Anyway suppressed the same surface until a confident transition. M3.1 replaces that rule with a bounded five-minute session/surface allowance. End Tunnel still clears active policy and prompt state without closing the supported app or immediately reopening the Purpose Gate.
 - Instagram capture now runs in release builds as required for M3 policy evaluation; developer fingerprints and tree UI remain debug-only. Normal overlays never expose resource IDs, confidence internals, node trees, fingerprints, or detector signal names.
-- The model includes an optional intended-duration field, but M3 does not expose timed sessions or expiry UI. This avoids introducing an unvalidated second intervention flow; no app is forcibly terminated.
+- M3 introduced the optional intended-duration field; M3.1 now exposes the documented lightweight duration choices and neutral expiry re-decision. No app is forcibly terminated.
 - Focused JVM tests cover Instagram Messages policy, YouTube Search/Watch policy, intentional browse, fail-open unknowns, Purpose Gate idempotence, override scoping, End Tunnel cleanup, Return cooldown cleanup, and active-session reuse.
 - The complete debug JVM suite passes 49 tests, `:app:assembleDebug` passes, and `git diff --check` reports no whitespace errors. APK: `app\build\outputs\apk\debug\app-debug.apk`.
-- `MANUAL_TEST_M3.md` contains the physical Instagram, YouTube, lifecycle, anti-loop, fail-open, privacy, and usability matrix. Every physical row remains pending.
+- `MANUAL_TEST_M3.md` contains the completed physical Instagram, YouTube, lifecycle, anti-loop, fail-open, privacy, and usability matrix.
 
 ## M2B Instagram surface-detection proof
 
