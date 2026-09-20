@@ -69,7 +69,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         current = this
         driftCoordinator.updateSelectedPackages(DriftPoolPreferences.load(this))
-        syncTunnelState { it.copy(connected = true) }
+        syncTunnelState { it.copy(connected = true, lastHeartbeatMillis = System.currentTimeMillis()) }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -80,6 +80,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
         if (!isInspectionEvent) return
+        AccessibilityRuntime.heartbeat()
         val state = AccessibilityRuntime.state.value
         val packageName = activeRootPackage() ?: run {
             AccessibilityRuntime.clearCurrentYouTubeDetection()

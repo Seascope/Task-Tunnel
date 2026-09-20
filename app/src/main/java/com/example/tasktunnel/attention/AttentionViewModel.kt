@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -11,24 +13,38 @@ import kotlinx.coroutines.launch
 data class AttentionUiState(
     val episodes: List<AttentionEpisode> = emptyList(),
     val metrics: AttentionMetrics = AttentionMetrics(0),
+    val historyAvailable: Boolean = true,
 )
 
 class AttentionViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = AttentionHistory.repository(application)
     private val sevenDaysAgoMillis = System.currentTimeMillis() - SEVEN_DAYS_MILLIS
+    private val historyAvailable = MutableStateFlow(true)
 
     val uiState = combine(
-        repository.observeRecent(),
-        repository.observeDriftEpisodesSince(sevenDaysAgoMillis),
-    ) { events, driftCount ->
+        repository.observeRecent().catch {
+            historyAvailable.value = false
+            emit(emptyList())
+        },
+        repository.observeDriftEpisodesSince(sevenDaysAgoMillis).catch {
+            historyAvailable.value = false
+            emit(0)
+        },
+        historyAvailable,
+    ) { events, driftCount, available ->
         AttentionUiState(
             episodes = AttentionEpisodeGrouper.group(events),
             metrics = AttentionMetrics(driftCount),
+            historyAvailable = available,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AttentionUiState())
 
     fun clearHistory() {
-        viewModelScope.launch { repository.clear() }
+        viewModelScope.launch {
+            runCatching { repository.clear() }
+                .onSuccess { historyAvailable.value = true }
+                .onFailure { historyAvailable.value = false }
+        }
     }
 
     companion object {

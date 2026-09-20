@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">TaskTunnel</string>
-    <string name="accessibility_service_label">Task Tunnel developer service</string>
-    <string name="accessibility_service_description">Developer-only feasibility spike for foreground observation, sanitized inspection, and a test overlay.</string>
+    <string name="app_name">Task Tunnel</string>
+    <string name="accessibility_service_label">Task Tunnel protection</string>
+    <string name="accessibility_service_description">Recognizes supported Instagram and YouTube surfaces to protect a purpose you choose. Processing stays on this device.</string>
 </resources>

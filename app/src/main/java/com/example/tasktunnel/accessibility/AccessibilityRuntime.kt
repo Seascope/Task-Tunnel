@@ -48,6 +48,7 @@ enum class InspectionStatus { IDLE, ARMED, CAPTURED, UNSUPPORTED_APP, ROOT_UNAVA
 
 data class AccessibilityState(
     val connected: Boolean = false,
+    val lastHeartbeatMillis: Long? = null,
     val foregroundPackage: String? = null,
     val lastRelevantEvent: String? = null,
     val packageHistory: List<PackageTransition> = emptyList(),
@@ -70,6 +71,10 @@ object AccessibilityRuntime {
 
     internal fun update(transform: (AccessibilityState) -> AccessibilityState) =
         mutableState.update(transform)
+
+    internal fun heartbeat(nowMillis: Long = System.currentTimeMillis()) = mutableState.update {
+        it.copy(connected = true, lastHeartbeatMillis = nowMillis)
+    }
 
     fun setInspectionArmed(armed: Boolean) {
         mutableState.update {
