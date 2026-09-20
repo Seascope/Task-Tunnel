@@ -92,6 +92,10 @@ object AccessibilityRuntime {
 
     fun requestTestOverlay() = TaskTunnelAccessibilityService.current?.scheduleTestOverlay() ?: false
 
+    fun setDriftPool(packages: Set<String>) {
+        TaskTunnelAccessibilityService.current?.onDriftPoolChanged(packages)
+    }
+
     internal fun clearCurrentYouTubeDetection() = mutableState.update { it.copy(currentYouTubeDetection = null) }
 
     internal fun clearCurrentInstagramDetection() = mutableState.update { it.copy(currentInstagramDetection = null) }

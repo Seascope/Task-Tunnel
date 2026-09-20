@@ -24,6 +24,10 @@ import com.example.tasktunnel.detector.YouTubeSurfaceDetector
 import com.example.tasktunnel.detector.YouTubeSurface
 import com.example.tasktunnel.diagnostics.SanitizedFingerprint
 import com.example.tasktunnel.diagnostics.YouTubeFingerprint
+import com.example.tasktunnel.drift.DriftAppCatalog
+import com.example.tasktunnel.drift.DriftCoordinator
+import com.example.tasktunnel.drift.DriftEpisode
+import com.example.tasktunnel.drift.DriftPoolPreferences
 import com.example.tasktunnel.tunnel.DetectedSurface
 import com.example.tasktunnel.tunnel.SupportedApp
 import com.example.tasktunnel.tunnel.TunnelCoordinator
@@ -34,8 +38,10 @@ import java.util.ArrayDeque
 class TaskTunnelAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val tunnelCoordinator = TunnelCoordinator()
+    private val driftCoordinator = DriftCoordinator(DriftAppCatalog.knownPackages)
     private var testOverlayView: LinearLayout? = null
     private var tunnelOverlayView: LinearLayout? = null
+    private var driftOverlayView: LinearLayout? = null
     private var shownTunnelPrompt: TunnelPrompt? = null
     private var lastCaptureAtElapsed = 0L
     private var lastTargetPackage: String? = null
@@ -57,6 +63,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         current = this
+        driftCoordinator.updateSelectedPackages(DriftPoolPreferences.load(this))
         syncTunnelState { it.copy(connected = true) }
     }
 
@@ -77,7 +84,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
         if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) AccessibilityRuntime.clearCurrentYouTubeDetection()
         if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
-        tunnelCoordinator.observeForeground(packageName, System.currentTimeMillis())
+        val nowMillis = System.currentTimeMillis()
+        tunnelCoordinator.observeForeground(packageName, nowMillis)
+        driftCoordinator.observeForeground(
+            packageName = packageName,
+            nowMillis = nowMillis,
+            activeTunnel = tunnelCoordinator.state.activeSession != null,
+        )
         updateTunnelUi()
         if (!isWindowEvent) {
             if (shouldCapture(packageName, state.inspectionArmed)) scheduleCapture()
@@ -123,6 +136,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(tunnelDeadline)
         removeTestOverlay()
         removeTunnelOverlay()
+        removeDriftOverlay()
+        driftCoordinator.clear()
         if (current === this) current = null
         AccessibilityRuntime.update {
             it.copy(
@@ -154,12 +169,18 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     fun scheduleTestOverlay(): Boolean {
         if (!BuildConfig.DEBUG) return false
-        if (tunnelCoordinator.state.prompt != null) return false
+        if (tunnelCoordinator.state.prompt != null || driftOverlayView != null) return false
         handler.removeCallbacks(showOverlay)
         removeTestOverlay()
         AccessibilityRuntime.update { it.copy(overlayPending = true, overlayVisible = false) }
         handler.postDelayed(showOverlay, OVERLAY_DELAY_MS)
         return true
+    }
+
+    fun onDriftPoolChanged(packages: Set<String>) {
+        driftCoordinator.updateSelectedPackages(packages)
+        removeDriftOverlay()
+        updateTunnelUi()
     }
 
     private fun scheduleCapture() {
@@ -324,7 +345,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun showTestOverlayNow() {
         AccessibilityRuntime.update { it.copy(overlayPending = false) }
-        if (testOverlayView != null || tunnelCoordinator.state.prompt != null) return
+        if (testOverlayView != null || tunnelCoordinator.state.prompt != null || driftOverlayView != null) return
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 24, 32, 24)
@@ -376,6 +397,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun updateTunnelUi() {
         syncTunnelState()
         refreshTunnelOverlay()
+        refreshDriftOverlay()
         scheduleTunnelDeadline()
     }
 
@@ -387,6 +409,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun refreshTunnelOverlay() {
         val prompt = tunnelCoordinator.state.prompt
+        if (prompt != null) removeDriftOverlay()
         if (prompt == shownTunnelPrompt && tunnelOverlayView != null) return
         removeTunnelOverlay()
         if (prompt == null) return
@@ -417,6 +440,68 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             tunnelOverlayView = null
             shownTunnelPrompt = null
         }
+    }
+
+    private fun refreshDriftOverlay() {
+        val tunnelState = tunnelCoordinator.state
+        val foregroundPackage = driftCoordinator.foregroundPackage
+        if (
+            tunnelState.prompt != null ||
+            tunnelState.activeSession != null ||
+            !driftCoordinator.isSelected(foregroundPackage)
+        ) {
+            removeDriftOverlay()
+            return
+        }
+        if (driftOverlayView != null) return
+        val episode = driftCoordinator.checkInCandidate(higherPriorityPromptVisible = false) ?: return
+        val labels = episode.involvedPackages.mapNotNull(DriftAppCatalog::labelFor)
+        if (labels.size < 2) return
+
+        handler.removeCallbacks(showOverlay)
+        removeTestOverlay()
+        AccessibilityRuntime.update { it.copy(overlayPending = false) }
+        val layout = driftCheckInView(episode, labels)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP
+            y = OVERLAY_TOP_OFFSET_PX
+        }
+        try {
+            getSystemService(WindowManager::class.java).addView(layout, params)
+            driftOverlayView = layout
+            driftCoordinator.markCheckInShown(episode.id)
+        } catch (_: RuntimeException) {
+            driftOverlayView = null
+        }
+    }
+
+    private fun driftCheckInView(episode: DriftEpisode, labels: List<String>) = baseTunnelOverlay().apply {
+        addView(overlayText("Looking for something?", heading = true))
+        addView(overlayText("You've moved between ${humanReadableList(labels)} in under a minute."))
+        addView(overlayButton("Set an intention") {
+            val app = driftCoordinator.setAnIntention(episode.id)
+            removeDriftOverlay()
+            if (app != null) tunnelCoordinator.requestPurposeGate(app)
+            updateTunnelUi()
+        })
+        addView(overlayButton("Keep going") {
+            driftCoordinator.keepGoing(episode.id)
+            removeDriftOverlay()
+            updateTunnelUi()
+        })
+    }
+
+    private fun humanReadableList(labels: List<String>): String = when (labels.size) {
+        0 -> "these apps"
+        1 -> labels.single()
+        2 -> "${labels[0]} and ${labels[1]}"
+        else -> labels.dropLast(1).joinToString(", ") + " and " + labels.last()
     }
 
     private fun purposeGateView(prompt: TunnelPrompt.PurposeGate) = baseTunnelOverlay().apply {
@@ -502,6 +587,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun startTunnel(task: TunnelTask, intendedDurationMillis: Long?) {
         tunnelCoordinator.startSession(task, System.currentTimeMillis(), intendedDurationMillis)
+        driftCoordinator.clear()
         updateTunnelUi()
         scheduleCapture()
     }
@@ -535,6 +621,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
         tunnelOverlayView = null
         shownTunnelPrompt = null
+    }
+
+    private fun removeDriftOverlay() {
+        driftOverlayView?.let { view ->
+            try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
+        }
+        driftOverlayView = null
     }
 
     private fun taskReminder(task: TunnelTask): String = when (task) {

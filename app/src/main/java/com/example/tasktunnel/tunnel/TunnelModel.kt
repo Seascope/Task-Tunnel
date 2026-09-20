@@ -205,6 +205,12 @@ class TunnelCoordinator(
         if (state.prompt is TunnelPrompt.PurposeGate) state = state.copy(prompt = null)
     }
 
+    fun requestPurposeGate(app: SupportedApp): Boolean {
+        if (state.activeSession != null || state.foregroundPackage != app.packageName) return false
+        state = state.copy(prompt = TunnelPrompt.PurposeGate(app))
+        return true
+    }
+
     fun startSession(task: TunnelTask, nowMillis: Long, intendedDurationMillis: Long? = null) {
         val gate = state.prompt as? TunnelPrompt.PurposeGate ?: return
         if (gate.app != task.app) return

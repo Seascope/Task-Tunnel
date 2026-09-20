@@ -1,8 +1,23 @@
 # Current State
 
+## M4 MVP Drift Detection
+
+Status: automated implementation is complete; physical-device validation is pending. M5 has not started.
+
+- Drift Detection now operates on foreground package transitions only. The pure in-memory detector ignores repeated observations from the same package, excludes non-selected apps from the qualifying count, keeps a bounded 24-transition rolling window, and stores no app content.
+- Central beta policy values are three distinct selected apps within 60 seconds, followed by a 60-second quiet period before a new episode can form. These are explicit `DriftPolicy` defaults rather than scattered literals.
+- An episode records an ID, start time, ordered involved package names, latest qualifying transition time, and whether its single check-in was shown or acknowledged. **Keep going** acknowledges the current episode without creating a Tunnel or treating the choice as failure. A new episode can trigger after the quiet reset.
+- The local Drift pool uses a small known-app catalog for Instagram, YouTube, and Reddit. The production home and debug app shell expose simple local switches backed by `SharedPreferences`. The implementation does not query installed apps, request `QUERY_ALL_PACKAGES`, or expand Task Tunnel surface policy beyond Instagram and YouTube.
+- The soft overlay uses human app labels and the approved observational copy direction. **Set an intention** returns to the existing Purpose Gate when the current app is Instagram or YouTube, without selecting a task. On Reddit or another unsupported Task Tunnel app it safely acknowledges and dismisses without creating a generic Tunnel.
+- Existing Task Tunnel UI has strict priority over Drift. Drift never stacks over a Purpose Gate, surface intervention, or expiry decision. An active Tunnel, including its M3.1 quick-return grace, clears/suppresses transient Drift accumulation. A Drift overlay is removed when the foreground becomes a non-selected or internal app.
+- Accessibility-service restart and Drift-pool changes clear transient detector and episode state. All runtime Drift state is in memory; only the user's selected pool is persisted locally.
+- Focused tests cover threshold/window behavior, repeated and non-selected packages, one check-in per episode, acknowledgement, quiet reset/new episode, supported and unsupported Set an intention routing, active-Tunnel suppression, overlay priority, unrelated-app behavior, and restart semantics.
+- All 18 focused Drift tests pass; all 24 M3/M3.1 policy and coordinator regression tests pass; the complete debug JVM suite passes 81 tests with zero failures; `:app:assembleDebug` passes; and `git diff --check` reports no whitespace errors. APK: `app\build\outputs\apk\debug\app-debug.apk`.
+- `MANUAL_TEST_M4.md` contains the physical positive, Keep Going, Set an intention, pool, slow-switching, existing-Tunnel, overlay-priority, lifecycle, and privacy matrix.
+
 ## M3.1 Task Tunnel timing alignment
 
-Status: automated implementation is complete; physical-device validation is pending. M4 has not started.
+Status: complete, including user-confirmed physical-device validation. M4 preserves the validated timing, expiry, grace, override, Purpose Gate, detector, and policy behavior.
 
 - **Allow anyway** now creates a temporary allowance scoped to the current Tunnel ID and incompatible surface. The beta allowance is an explicit coordinator policy value of five minutes. Allowed-surface navigation and brief app switches do not cancel it; another incompatible surface does not inherit it; the next incompatible detection after expiry may intervene again.
 - Active Tunnels now survive a short switch away from their protected app. The beta quick-return grace is an explicit coordinator policy value of 60 seconds. Returning inside grace resumes the same Tunnel without a Purpose Gate; grace expiry clears it silently, and the next protected-app foreground visit receives a fresh gate. Explicit End Tunnel and accessibility-service restart still clear state immediately.
@@ -10,7 +25,7 @@ Status: automated implementation is complete; physical-device validation is pend
 - A timed Tunnel derives its expiry from its start time and selected duration. Foreground expiry shows a neutral re-decision with **Finish**, **Continue**, and **Choose another purpose**. Finish ends the Tunnel without closing the host app; Continue starts a fresh window of the same duration; Choose another purpose returns to the Purpose Gate.
 - Timed expiry while the protected app is backgrounded ends silently. The service schedules only the next coordinator deadline and verifies the current active-root package before applying it, so expiry and grace do not place Task Tunnel UI over an unrelated app.
 - Timing remains in the pure `TunnelCoordinator`; detector classification and `SessionPolicy` rules are unchanged. `UNKNOWN` continues to fail open, and normal user UI still excludes diagnostic details.
-- Focused M3.1 tests cover allowance scope/expiry, quick return, explicit end/service-reset semantics, unrelated-app behavior, optional/no-limit duration, foreground expiry decisions, silent background expiry, and deadline selection. All 24 focused coordinator/policy tests pass; the complete debug JVM suite passes 63 tests; and `:app:assembleDebug` passes. Physical M3.1 validation remains pending.
+- Focused M3.1 tests cover allowance scope/expiry, quick return, explicit end/service-reset semantics, unrelated-app behavior, optional/no-limit duration, foreground expiry decisions, silent background expiry, and deadline selection. All 24 focused coordinator/policy tests pass; the complete debug JVM suite passes 63 tests; and `:app:assembleDebug` passes. Physical M3.1 validation passed per user confirmation.
 - `MANUAL_TEST_M3_1.md` contains the physical Allow Anyway, quick-return, timed-session, background-expiry, fail-open, and privacy matrix.
 
 ## M3 Task Tunnel interaction

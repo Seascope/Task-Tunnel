@@ -40,6 +40,8 @@ import com.example.tasktunnel.accessibility.AccessibilityState
 import com.example.tasktunnel.accessibility.ObservedInstagramDetection
 import com.example.tasktunnel.accessibility.ObservedYouTubeDetection
 import com.example.tasktunnel.accessibility.SanitizedNode
+import com.example.tasktunnel.drift.DriftAppCatalog
+import com.example.tasktunnel.drift.DriftPoolPreferences
 import com.example.tasktunnel.ui.theme.TaskTunnelTheme
 import java.text.DateFormat
 import java.util.Date
@@ -54,12 +56,26 @@ class MainActivity : ComponentActivity() {
             TaskTunnelTheme {
                 val runtime by AccessibilityRuntime.state.collectAsState()
                 var inspectorOpen by remember { mutableStateOf(false) }
+                var selectedDriftPackages by remember {
+                    mutableStateOf(DriftPoolPreferences.load(this@MainActivity))
+                }
+                val setDriftAppEnabled: (String, Boolean) -> Unit = { packageName, enabled ->
+                    selectedDriftPackages = if (enabled) {
+                        selectedDriftPackages + packageName
+                    } else {
+                        selectedDriftPackages - packageName
+                    }
+                    DriftPoolPreferences.save(this@MainActivity, selectedDriftPackages)
+                    AccessibilityRuntime.setDriftPool(selectedDriftPackages)
+                }
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
                     if (!BuildConfig.DEBUG) {
                         TaskTunnelHome(
                             runtime.connected,
                             serviceEnabled,
                             { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                            selectedDriftPackages,
+                            setDriftAppEnabled,
                             Modifier.padding(padding),
                         )
                     } else if (inspectorOpen) {
@@ -70,6 +86,8 @@ class MainActivity : ComponentActivity() {
                             serviceEnabled,
                             { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                             { inspectorOpen = true },
+                            selectedDriftPackages,
+                            setDriftAppEnabled,
                             Modifier.padding(padding),
                         )
                     }
@@ -91,6 +109,8 @@ private fun TaskTunnelHome(
     serviceConnected: Boolean,
     enabledInSettings: Boolean,
     openSettings: () -> Unit,
+    selectedDriftPackages: Set<String>,
+    setDriftAppEnabled: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -106,6 +126,7 @@ private fun TaskTunnelHome(
             }
         }
         Button(onClick = openSettings) { Text("Open accessibility settings") }
+        DriftPoolCard(selectedDriftPackages, setDriftAppEnabled)
     }
 }
 
@@ -115,6 +136,8 @@ private fun DeveloperScreen(
     enabledInSettings: Boolean,
     openSettings: () -> Unit,
     openInspector: () -> Unit,
+    selectedDriftPackages: Set<String>,
+    setDriftAppEnabled: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -130,6 +153,7 @@ private fun DeveloperScreen(
             }
         }
         item { Button(onClick = openSettings) { Text("Open accessibility settings") } }
+        item { DriftPoolCard(selectedDriftPackages, setDriftAppEnabled) }
         item {
             val current = runtime.currentYouTubeDetection
             DetectionCard(current ?: runtime.lastYouTubeDetection, current != null)
@@ -163,6 +187,31 @@ private fun DeveloperScreen(
         if (runtime.packageHistory.isEmpty()) item { Text("None observed") }
         items(runtime.packageHistory) { transition ->
             Text("${transition.packageName} — ${formatTime(transition.observedAtMillis)}")
+        }
+    }
+}
+
+@Composable
+private fun DriftPoolCard(
+    selectedPackages: Set<String>,
+    setEnabled: (String, Boolean) -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Drift check-in apps", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Choose the small set of apps that can contribute to a Drift check-in. The beta check needs three selected apps.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            DriftAppCatalog.apps.forEach { app ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(app.displayName, Modifier.weight(1f))
+                    Switch(
+                        checked = app.packageName in selectedPackages,
+                        onCheckedChange = { setEnabled(app.packageName, it) },
+                    )
+                }
+            }
         }
     }
 }
