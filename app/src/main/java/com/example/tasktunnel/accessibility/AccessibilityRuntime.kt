@@ -46,6 +46,8 @@ data class ObservedInstagramDetection(
 
 enum class InspectionStatus { IDLE, ARMED, CAPTURED, UNSUPPORTED_APP, ROOT_UNAVAILABLE, ERROR }
 
+enum class VisualQaOverlay { PURPOSE_GATE, INTERVENTION, DRIFT_CHECK_IN, SESSION_EXPIRY }
+
 data class AccessibilityState(
     val connected: Boolean = false,
     val lastHeartbeatMillis: Long? = null,
@@ -96,6 +98,13 @@ object AccessibilityRuntime {
     }
 
     fun requestTestOverlay() = TaskTunnelAccessibilityService.current?.scheduleTestOverlay() ?: false
+
+    fun requestVisualQaOverlay(overlay: VisualQaOverlay): Boolean =
+        if (com.example.tasktunnel.BuildConfig.DEBUG) {
+            TaskTunnelAccessibilityService.current?.showVisualQaOverlay(overlay) ?: false
+        } else {
+            false
+        }
 
     fun setDriftPool(packages: Set<String>) {
         TaskTunnelAccessibilityService.current?.onDriftPoolChanged(packages)

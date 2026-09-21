@@ -1,23 +1,26 @@
 package com.example.tasktunnel.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.content.res.ColorStateList
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.TextView
 import com.example.tasktunnel.BuildConfig
+import com.example.tasktunnel.R
 import com.example.tasktunnel.attention.AttentionDecision
 import com.example.tasktunnel.attention.AttentionHistory
 import com.example.tasktunnel.attention.AttentionSubtype
@@ -47,6 +50,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private var testOverlayView: LinearLayout? = null
     private var tunnelOverlayView: LinearLayout? = null
     private var driftOverlayView: LinearLayout? = null
+    private var visualQaOverlayView: LinearLayout? = null
     private var shownTunnelPrompt: TunnelPrompt? = null
     private var lastCaptureAtElapsed = 0L
     private var lastTargetPackage: String? = null
@@ -143,6 +147,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         removeTestOverlay()
         removeTunnelOverlay()
         removeDriftOverlay()
+        removeVisualQaOverlay()
         driftCoordinator.clear()
         if (current === this) current = null
         AccessibilityRuntime.update {
@@ -181,6 +186,54 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         AccessibilityRuntime.update { it.copy(overlayPending = true, overlayVisible = false) }
         handler.postDelayed(showOverlay, OVERLAY_DELAY_MS)
         return true
+    }
+
+    fun showVisualQaOverlay(overlay: VisualQaOverlay): Boolean {
+        if (!BuildConfig.DEBUG) return false
+        removeVisualQaOverlay()
+        val now = System.currentTimeMillis()
+        val layout = when (overlay) {
+            VisualQaOverlay.PURPOSE_GATE -> purposeGateView(TunnelPrompt.PurposeGate(SupportedApp.INSTAGRAM))
+            VisualQaOverlay.INTERVENTION -> interventionView(
+                TunnelPrompt.Intervention("visual-qa", TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.INSTAGRAM_REELS),
+            )
+            VisualQaOverlay.DRIFT_CHECK_IN -> {
+                val packages = listOf("com.instagram.android", "com.reddit.frontpage", "com.google.android.youtube")
+                driftCheckInView(
+                    DriftEpisode("visual-qa", now - 45_000L, packages, now),
+                    packages.mapNotNull(DriftAppCatalog::labelFor),
+                )
+            }
+            VisualQaOverlay.SESSION_EXPIRY -> sessionExpiredView(
+                TunnelPrompt.SessionExpired("visual-qa", SupportedApp.INSTAGRAM, TunnelTask.INSTAGRAM_MESSAGES),
+            )
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_DIM_BEHIND,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM
+            dimAmount = if (overlay == VisualQaOverlay.DRIFT_CHECK_IN) 0.32f else 0.42f
+        }
+        return try {
+            getSystemService(WindowManager::class.java).addView(layout, params)
+            visualQaOverlayView = layout
+            if (overlay == VisualQaOverlay.PURPOSE_GATE) {
+                layout.alpha = 0f
+                layout.translationY = dp(28).toFloat()
+                layout.animate().alpha(1f).translationY(0f).setDuration(150L).start()
+            } else {
+                animateOverlayEntrance(layout)
+            }
+            handler.postDelayed({ if (visualQaOverlayView === layout) removeVisualQaOverlay() }, VISUAL_QA_TIMEOUT_MS)
+            true
+        } catch (_: RuntimeException) {
+            visualQaOverlayView = null
+            false
+        }
     }
 
     fun onDriftPoolChanged(packages: Set<String>) {
@@ -440,14 +493,27 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_DIM_BEHIND,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP
-            y = OVERLAY_TOP_OFFSET_PX
+            gravity = Gravity.BOTTOM
+            dimAmount = 0.42f
         }
         try {
             getSystemService(WindowManager::class.java).addView(layout, params)
+            val isPurposeGate = prompt is TunnelPrompt.PurposeGate
+            if (isPurposeGate) {
+                layout.alpha = 0f
+                layout.translationY = dp(28).toFloat()
+                layout.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(200L)
+                    .setInterpolator(android.view.animation.DecelerateInterpolator())
+                    .start()
+            } else {
+                animateOverlayEntrance(layout)
+            }
             tunnelOverlayView = layout
             shownTunnelPrompt = prompt
             attentionRecorder.tunnelPromptShown(
@@ -485,14 +551,15 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_DIM_BEHIND,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP
-            y = OVERLAY_TOP_OFFSET_PX
+            gravity = Gravity.BOTTOM
+            dimAmount = 0.32f
         }
         try {
             getSystemService(WindowManager::class.java).addView(layout, params)
+            animateOverlayEntrance(layout)
             driftOverlayView = layout
             driftCoordinator.markCheckInShown(episode.id)
             attentionRecorder.driftCheckInShown(episode, System.currentTimeMillis())
@@ -502,9 +569,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun driftCheckInView(episode: DriftEpisode, labels: List<String>) = baseTunnelOverlay().apply {
+        addView(overlayAppSequence(episode.involvedPackages, labels))
         addView(overlayText("Looking for something?", heading = true))
-        addView(overlayText("You've moved between ${humanReadableList(labels)} in under a minute."))
-        addView(overlayButton("Set an intention") {
+        addView(overlayText("You moved between ${humanReadableList(labels)} in under a minute.", secondary = true))
+        addView(overlayPrimaryButton("Set an intention") {
             attentionRecorder.driftDecision(
                 episode = episode,
                 subtype = AttentionSubtype.SET_INTENTION,
@@ -517,7 +585,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             if (app != null) tunnelCoordinator.requestPurposeGate(app)
             updateTunnelUi()
         })
-        addView(overlayButton("Keep going") {
+        addView(overlayTextButton("Keep going") {
             attentionRecorder.driftDecision(
                 episode = episode,
                 subtype = AttentionSubtype.KEEP_GOING,
@@ -538,50 +606,65 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         else -> labels.dropLast(1).joinToString(", ") + " and " + labels.last()
     }
 
-    private fun purposeGateView(prompt: TunnelPrompt.PurposeGate) = baseTunnelOverlay().apply {
+    private fun purposeGateView(prompt: TunnelPrompt.PurposeGate) = baseTunnelOverlay(compact = true).apply {
         var selectedDurationMillis: Long? = null
-        addView(overlayText("What did you open ${prompt.app.displayName} to do?", heading = true))
-        addView(overlayText("Optional duration"))
-        addView(RadioGroup(context).apply {
-            orientation = RadioGroup.HORIZONTAL
-            DURATION_CHOICES.forEachIndexed { index, choice ->
-                addView(RadioButton(context).apply {
-                    id = View.generateViewId()
-                    text = choice.label
-                    setTextColor(0xFFFFFFFF.toInt())
-                    isChecked = index == 0
-                    setOnClickListener { selectedDurationMillis = choice.durationMillis }
-                })
-            }
-        })
+        addView(purposeGateAppIdentity(prompt.app))
+        addView(purposeGateQuestion())
+        val durationSelector = purposeDurationSelector()
+        val durationValue = TextView(context).apply {
+            text = DURATION_CHOICES.first().label
+            textSize = 14f
+            setTextColor(COLOR_SECONDARY_TEXT)
+        }
         when (prompt.app) {
             SupportedApp.INSTAGRAM -> {
-                addView(overlayButton("Reply to messages") {
+                addView(purposeChoiceRow(R.drawable.ic_purpose_message, "Reply to messages", "Go straight to conversations") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     startTunnel(TunnelTask.INSTAGRAM_MESSAGES, selectedDurationMillis)
                 })
-                addView(overlayButton("Browse intentionally") {
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     startTunnel(TunnelTask.INSTAGRAM_BROWSE, selectedDurationMillis)
                 })
             }
             SupportedApp.YOUTUBE -> {
-                addView(overlayButton("Search / watch something specific") {
+                addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     startTunnel(TunnelTask.YOUTUBE_SEARCH_WATCH, selectedDurationMillis)
                 })
-                addView(overlayButton("Browse intentionally") {
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     startTunnel(TunnelTask.YOUTUBE_BROWSE, selectedDurationMillis)
                 })
             }
         }
-        addView(overlayButton("Not now") {
+        lateinit var timeLimitRow: View
+        timeLimitRow = purposeTimeLimitRow(durationValue) {
+            timeLimitRow.visibility = View.GONE
+            durationSelector.visibility = View.VISIBLE
+        }
+        addView(timeLimitRow)
+        durationSelector.onDurationSelected = { choice ->
+            selectedDurationMillis = choice.durationMillis
+            durationValue.text = choice.label
+            durationSelector.visibility = View.GONE
+            timeLimitRow.visibility = View.VISIBLE
+        }
+        addView(durationSelector)
+        addView(purposeDismissButton {
             tunnelCoordinator.dismissPurposeGate()
             updateTunnelUi()
         })
     }
 
     private fun interventionView(prompt: TunnelPrompt.Intervention) = baseTunnelOverlay().apply {
-        addView(overlayText(taskReminder(prompt.task), heading = true))
-        addView(overlayText("${surfaceLabel(prompt.surface)} is outside this Task Tunnel."))
-        addView(overlayButton("Return") {
+        val surface = surfaceLabel(prompt.surface)
+        addView(overlayAppIdentity(prompt.task.app))
+        addView(overlayText("$surface isn't part of this Tunnel", heading = true))
+        addView(overlayText(taskReminder(prompt.task), secondary = true))
+        addView(overlayPrimaryButton(returnLabel(prompt.task)) {
             val session = tunnelCoordinator.state.activeSession
             val nowMillis = System.currentTimeMillis()
             if (tunnelCoordinator.returnFromIntervention(nowMillis)) {
@@ -598,20 +681,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 performGlobalAction(GLOBAL_ACTION_BACK)
             }
         })
-        addView(overlayButton("End Tunnel") {
-            tunnelCoordinator.state.activeSession?.let {
-                attentionRecorder.tunnelDecision(
-                    it,
-                    AttentionSubtype.END_TUNNEL,
-                    AttentionDecision.END_TUNNEL,
-                    System.currentTimeMillis(),
-                    prompt.surface,
-                )
-            }
-            tunnelCoordinator.endSession()
-            updateTunnelUi()
-        })
-        addView(overlayButton("Allow anyway") {
+        addView(overlayTextButton("Allow $surface for now") {
             val nowMillis = System.currentTimeMillis()
             tunnelCoordinator.state.activeSession?.let {
                 attentionRecorder.tunnelDecision(
@@ -625,24 +695,25 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             tunnelCoordinator.allowAnyway(nowMillis)
             updateTunnelUi()
         })
-    }
-
-    private fun sessionExpiredView(prompt: TunnelPrompt.SessionExpired) = baseTunnelOverlay().apply {
-        addView(overlayText("Your Task Tunnel time is complete.", heading = true))
-        addView(overlayText("What would you like to do in ${prompt.app.displayName}?"))
-        addView(overlayButton("Finish") {
+        addView(overlayTextButton("End Tunnel", quiet = true) {
             tunnelCoordinator.state.activeSession?.let {
                 attentionRecorder.tunnelDecision(
                     it,
-                    AttentionSubtype.EXPIRY_FINISH,
-                    AttentionDecision.FINISH,
+                    AttentionSubtype.END_TUNNEL,
+                    AttentionDecision.END_TUNNEL,
                     System.currentTimeMillis(),
+                    prompt.surface,
                 )
             }
             tunnelCoordinator.endSession()
             updateTunnelUi()
         })
-        addView(overlayButton(if (prompt.task == TunnelTask.INSTAGRAM_BROWSE || prompt.task == TunnelTask.YOUTUBE_BROWSE) {
+    }
+
+    private fun sessionExpiredView(prompt: TunnelPrompt.SessionExpired) = baseTunnelOverlay().apply {
+        addView(overlayText("Your chosen time is complete", heading = true))
+        addView(overlayText("What would you like to do next?", secondary = true))
+        addView(overlayPrimaryButton(if (prompt.task == TunnelTask.INSTAGRAM_BROWSE || prompt.task == TunnelTask.YOUTUBE_BROWSE) {
             "Keep browsing"
         } else {
             "Continue"
@@ -660,7 +731,19 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             updateTunnelUi()
             scheduleCapture()
         })
-        addView(overlayButton("Choose another purpose") {
+        addView(overlayTextButton("Finish") {
+            tunnelCoordinator.state.activeSession?.let {
+                attentionRecorder.tunnelDecision(
+                    it,
+                    AttentionSubtype.EXPIRY_FINISH,
+                    AttentionDecision.FINISH,
+                    System.currentTimeMillis(),
+                )
+            }
+            tunnelCoordinator.endSession()
+            updateTunnelUi()
+        })
+        addView(overlayTextButton("Choose another purpose", quiet = true) {
             tunnelCoordinator.state.activeSession?.let {
                 attentionRecorder.tunnelDecision(
                     it,
@@ -683,27 +766,269 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         scheduleCapture()
     }
 
-    private fun baseTunnelOverlay() = LinearLayout(this).apply {
+    private fun baseTunnelOverlay(compact: Boolean = false) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(OVERLAY_PADDING_PX, OVERLAY_PADDING_PX, OVERLAY_PADDING_PX, OVERLAY_PADDING_PX)
+        setPadding(dp(20), dp(10), dp(20), dp(if (compact) 16 else 20) + navigationBarInset())
         background = GradientDrawable().apply {
-            setColor(0xFA202124.toInt())
-            cornerRadius = OVERLAY_CORNER_RADIUS_PX
+            setColor(COLOR_SHEET)
+            cornerRadii = floatArrayOf(dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), 0f, 0f, 0f, 0f)
         }
-        elevation = OVERLAY_ELEVATION_PX
+        elevation = dp(12).toFloat()
+        addView(View(context).apply {
+            background = GradientDrawable().apply { setColor(COLOR_HANDLE); cornerRadius = dp(2).toFloat() }
+        }, LinearLayout.LayoutParams(dp(36), dp(4)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            bottomMargin = dp(if (compact) 12 else 18)
+        })
     }
 
-    private fun overlayText(value: String, heading: Boolean = false) = TextView(this).apply {
+    private fun overlayText(value: String, heading: Boolean = false, secondary: Boolean = false) = TextView(this).apply {
         text = value
-        setTextColor(0xFFFFFFFF.toInt())
-        textSize = if (heading) 20f else 16f
-        setPadding(0, 0, 0, OVERLAY_ITEM_GAP_PX)
+        setTextColor(if (secondary) COLOR_SECONDARY_TEXT else COLOR_PRIMARY_TEXT)
+        textSize = if (heading) 23f else 15f
+        if (heading) setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setLineSpacing(0f, 1.08f)
+        setPadding(0, 0, 0, if (heading) dp(10) else dp(18))
     }
 
-    private fun overlayButton(label: String, action: () -> Unit) = Button(this).apply {
+    private fun overlayPrimaryButton(label: String, action: () -> Unit) = Button(this).apply {
         text = label
         isAllCaps = false
+        textSize = 15f
+        setTextColor(COLOR_ON_PRIMARY)
+        minHeight = dp(50)
+        background = RippleDrawable(
+            ColorStateList.valueOf(COLOR_ON_PRIMARY),
+            GradientDrawable().apply {
+                setColor(COLOR_PRIMARY)
+                cornerRadius = dp(12).toFloat()
+            },
+            null,
+        )
         setOnClickListener { action() }
+    }.also { it.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(6); bottomMargin = dp(4) } }
+
+    private fun overlayTextButton(label: String, quiet: Boolean = false, action: () -> Unit) = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        textSize = 15f
+        setTextColor(if (quiet) COLOR_SECONDARY_TEXT else COLOR_PRIMARY)
+        minHeight = dp(48)
+        isClickable = true
+        isFocusable = true
+        setBackgroundResource(android.R.drawable.list_selector_background)
+        setOnClickListener { action() }
+    }
+
+    private fun overlayChoiceRow(label: String, action: (View) -> Unit) = TextView(this).apply {
+        text = "$label    ›"
+        gravity = Gravity.CENTER_VERTICAL
+        textSize = 17f
+        setTextColor(COLOR_PRIMARY_TEXT)
+        setPadding(dp(12), 0, dp(10), 0)
+        minHeight = dp(58)
+        isClickable = true
+        isFocusable = true
+        setBackgroundResource(android.R.drawable.list_selector_background)
+        setOnClickListener { action(this) }
+    }
+
+    private fun purposeGateAppIdentity(app: SupportedApp) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, 0, 0, dp(8))
+        addView(appIconView(app.packageName, app.displayName), LinearLayout.LayoutParams(dp(26), dp(26)))
+        addView(TextView(context).apply {
+            text = app.displayName
+            textSize = 14f
+            setTextColor(COLOR_SECONDARY_TEXT)
+            setPadding(dp(9), 0, 0, 0)
+        })
+    }
+
+    private fun purposeGateQuestion() = TextView(this).apply {
+        text = "What are you here to do?"
+        textSize = 22f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setTextColor(COLOR_PRIMARY_TEXT)
+        setLineSpacing(0f, 1.06f)
+        setPadding(0, 0, 0, dp(8))
+    }
+
+    private fun purposeChoiceRow(
+        iconRes: Int,
+        title: String,
+        subtitle: String,
+        action: (View) -> Unit,
+    ) = LinearLayout(this).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(64)
+        setPadding(dp(2), dp(8), dp(4), dp(8))
+        isClickable = true
+        isFocusable = true
+        setBackgroundResource(android.R.drawable.list_selector_background)
+        contentDescription = "$title. $subtitle"
+        addView(ImageView(context).apply {
+            setImageResource(iconRes)
+            imageTintList = ColorStateList.valueOf(COLOR_SECONDARY_TEXT)
+            contentDescription = null
+        }, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(14) })
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(context).apply {
+                text = title
+                textSize = 16f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setTextColor(COLOR_PRIMARY_TEXT)
+            })
+            addView(TextView(context).apply {
+                text = subtitle
+                textSize = 13f
+                setTextColor(COLOR_SECONDARY_TEXT)
+                setPadding(0, dp(2), 0, 0)
+                maxLines = 1
+            })
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        setOnClickListener { action(this) }
+    }
+
+    private fun purposeTimeLimitRow(valueView: TextView, action: () -> Unit) = LinearLayout(this).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(48)
+        setPadding(dp(2), dp(4), dp(4), dp(2))
+        isClickable = true
+        isFocusable = true
+        setBackgroundResource(android.R.drawable.list_selector_background)
+        addView(TextView(context).apply {
+            text = "Time limit"
+            textSize = 14f
+            setTextColor(COLOR_SECONDARY_TEXT)
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        addView(valueView)
+        setOnClickListener { action() }
+    }
+
+    private fun purposeDismissButton(action: () -> Unit) = TextView(this).apply {
+        text = "Not now"
+        gravity = Gravity.CENTER
+        textSize = 14f
+        setTextColor(COLOR_SECONDARY_TEXT)
+        minHeight = dp(48)
+        isClickable = true
+        isFocusable = true
+        setBackgroundResource(android.R.drawable.list_selector_background)
+        setOnClickListener { action() }
+    }
+
+    private fun purposeDurationSelector(): PurposeDurationSelector = PurposeDurationSelector()
+
+    private inner class PurposeDurationSelector : LinearLayout(this@TaskTunnelAccessibilityService) {
+        var onDurationSelected: ((DurationChoice) -> Unit)? = null
+        private val optionViews = mutableListOf<TextView>()
+        private var selectedIndex = 0
+
+        init {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            setPadding(0, dp(2), 0, dp(4))
+            DURATION_CHOICES.forEachIndexed { index, choice ->
+                val option = TextView(context).apply {
+                    text = choice.label
+                    gravity = Gravity.CENTER
+                    textSize = 13f
+                    minHeight = dp(48)
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = "Time limit ${choice.label}"
+                    setOnClickListener {
+                        selectedIndex = index
+                        updateSelection()
+                        onDurationSelected?.invoke(choice)
+                    }
+                }
+                optionViews += option
+                addView(option, LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+                    marginStart = if (index == 0) 0 else dp(6)
+                })
+            }
+            updateSelection()
+        }
+
+        private fun updateSelection() {
+            optionViews.forEachIndexed { index, option ->
+                val selected = index == selectedIndex
+                option.setTextColor(if (selected) COLOR_PRIMARY else COLOR_SECONDARY_TEXT)
+                option.background = RippleDrawable(
+                    ColorStateList.valueOf(COLOR_PRIMARY),
+                    GradientDrawable().apply {
+                        setColor(if (selected) COLOR_DURATION_SELECTED else COLOR_DURATION_UNSELECTED)
+                        cornerRadius = dp(10).toFloat()
+                    },
+                    null,
+                )
+            }
+        }
+    }
+
+    private fun overlayDivider() = View(this).apply { setBackgroundColor(COLOR_DIVIDER) }.also {
+        it.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply { marginStart = dp(12); marginEnd = dp(12) }
+    }
+
+    private fun overlayAppIdentity(app: SupportedApp) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, 0, 0, dp(8))
+        addView(appIconView(app.packageName, app.displayName), LinearLayout.LayoutParams(dp(26), dp(26)))
+        addView(TextView(context).apply {
+            text = app.displayName
+            textSize = 14f
+            setTextColor(COLOR_SECONDARY_TEXT)
+            setPadding(dp(9), 0, 0, 0)
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+    }
+
+    private fun overlayAppSequence(packages: List<String>, labels: List<String>) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, 0, 0, dp(14))
+        packages.zip(labels).take(3).forEachIndexed { index, (packageName, label) ->
+            if (index > 0) {
+                addView(TextView(context).apply {
+                    text = "→"
+                    gravity = Gravity.CENTER
+                    textSize = 16f
+                    setTextColor(COLOR_SECONDARY_TEXT)
+                    contentDescription = null
+                }, LinearLayout.LayoutParams(dp(20), dp(28)))
+            }
+            addView(appIconView(packageName, label), LinearLayout.LayoutParams(dp(28), dp(28)))
+        }
+    }
+
+    private fun animateOverlayEntrance(layout: View) {
+        layout.alpha = 0f
+        layout.translationY = dp(28).toFloat()
+        layout.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(200L)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .start()
+    }
+
+    private fun appIconView(packageName: String, displayName: String): View = runCatching {
+        ImageView(this).apply {
+            setImageDrawable(packageManager.getApplicationIcon(packageName))
+            contentDescription = null
+        }
+    }.getOrElse {
+        TextView(this).apply {
+            text = displayName.take(1)
+            gravity = Gravity.CENTER
+            textSize = 14f
+            setTextColor(COLOR_PRIMARY_TEXT)
+            background = GradientDrawable().apply { setColor(fallbackAppColor(packageName)); cornerRadius = dp(7).toFloat() }
+        }
     }
 
     private fun removeTunnelOverlay() {
@@ -721,11 +1046,40 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         driftOverlayView = null
     }
 
+    private fun removeVisualQaOverlay() {
+        visualQaOverlayView?.let { view ->
+            try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
+        }
+        visualQaOverlayView = null
+    }
+
     private fun taskReminder(task: TunnelTask): String = when (task) {
-        TunnelTask.INSTAGRAM_MESSAGES -> "You opened Instagram to reply to messages."
-        TunnelTask.INSTAGRAM_BROWSE -> "You opened Instagram to browse intentionally."
-        TunnelTask.YOUTUBE_SEARCH_WATCH -> "You opened YouTube to search for or watch something."
-        TunnelTask.YOUTUBE_BROWSE -> "You opened YouTube to browse intentionally."
+        TunnelTask.INSTAGRAM_MESSAGES -> "You came here to reply to messages."
+        TunnelTask.INSTAGRAM_BROWSE -> "You came here to browse intentionally."
+        TunnelTask.YOUTUBE_SEARCH_WATCH -> "You came here to search for or watch something."
+        TunnelTask.YOUTUBE_BROWSE -> "You came here to browse intentionally."
+    }
+
+    private fun returnLabel(task: TunnelTask): String = when (task) {
+        TunnelTask.INSTAGRAM_MESSAGES -> "Return to Messages"
+        TunnelTask.YOUTUBE_SEARCH_WATCH -> "Return to Search / video"
+        TunnelTask.INSTAGRAM_BROWSE,
+        TunnelTask.YOUTUBE_BROWSE,
+        -> "Return"
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun navigationBarInset(): Int {
+        val id = resources.getIdentifier("navigation_bar_height", "dimen", "android")
+        return if (id != 0) resources.getDimensionPixelSize(id).coerceAtMost(dp(32)) else 0
+    }
+
+    private fun fallbackAppColor(packageName: String): Int = when (packageName) {
+        "com.instagram.android" -> 0xFFD65A79.toInt()
+        "com.google.android.youtube" -> 0xFFE45B55.toInt()
+        "com.reddit.frontpage" -> 0xFFFF6B35.toInt()
+        else -> COLOR_PRIMARY
     }
 
     private fun surfaceLabel(surface: DetectedSurface): String = when (surface) {
@@ -768,11 +1122,16 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         private const val CAPTURE_THROTTLE_MS = 1_000L
         private const val DEADLINE_RETRY_MS = 1_000L
         private const val OVERLAY_DELAY_MS = 3_000L
-        private const val OVERLAY_TOP_OFFSET_PX = 72
-        private const val OVERLAY_PADDING_PX = 32
-        private const val OVERLAY_ITEM_GAP_PX = 12
-        private const val OVERLAY_CORNER_RADIUS_PX = 24f
-        private const val OVERLAY_ELEVATION_PX = 12f
+        private const val VISUAL_QA_TIMEOUT_MS = 45_000L
+        private const val COLOR_SHEET = 0xFF191C1F.toInt()
+        private const val COLOR_PRIMARY_TEXT = 0xFFF1F3F4.toInt()
+        private const val COLOR_SECONDARY_TEXT = 0xFFA7ADB4.toInt()
+        private const val COLOR_DIVIDER = 0xFF2A2E32.toInt()
+        private const val COLOR_HANDLE = 0xFF5E646B.toInt()
+        private const val COLOR_PRIMARY = 0xFF79AFFF.toInt()
+        private const val COLOR_ON_PRIMARY = 0xFF061A32.toInt()
+        private const val COLOR_DURATION_SELECTED = 0xFF14345F.toInt()
+        private const val COLOR_DURATION_UNSELECTED = 0xFF202428.toInt()
         private val DURATION_CHOICES = listOf(
             DurationChoice("No limit", null),
             DurationChoice("5 min", 5 * 60_000L),

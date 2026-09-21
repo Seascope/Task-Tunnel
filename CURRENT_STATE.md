@@ -1,5 +1,36 @@
 # Current State
 
+## UI polish pass 5
+
+Status: implementation, debug assembly, and requested device-capture verification are complete.
+
+- Production-facing copy now uses plain product language for Android Accessibility access, local processing, Attention history, and setup. MVP, backend, service-class, and structured-event wording was removed from normal UI while technical diagnostics remain unchanged.
+- Protection keeps the existing off-state explanation and repair path, with a compact 48dp action labeled **Turn protection on**. The nearby explanation continues to state that Android Accessibility access is required.
+- Privacy disclosure retains its complete meaning: what Accessibility can see, why it is needed, what is stored and not stored, and that processing stays on the device with no account or cloud connection required.
+- No runtime behavior, detector, policy, persistence, developer/debug UI, navigation structure, or Attention/Episode Detail design changed in this pass.
+- `GRADLE_USER_HOME=C:\\Users\\rubin\\.gradle .\\gradlew.bat :app:assembleDebug --no-daemon` passes. `git diff --check` is clean. Fresh 1080x2354 captures for Protection off, Privacy & Accessibility, and Settings/About are retained in `artifacts/ui-polish-pass-5/`; the existing app data was preserved with `adb install -r`. No runtime overlays were captured.
+
+## UI polish pass 4
+
+Status: implementation, JVM verification, debug assembly, six requested physical captures, and narrow-viewport inspection are complete. Fresh Pass 4 captures are retained in `artifacts/ui-polish-pass-4/`; the existing Attention database, WAL, and SHM were temporarily backed up inside the app sandbox for the empty-state capture and restored afterward. Populated history returned successfully.
+
+- The primary production shell now uses a compact inset-aware header, a quiet two-destination bottom navigation state, and a consistent Material outlined icon family.
+- Attention uses compact protection repair routing when protection is off, outcome-led episode summaries, text-first Drift rows, and less divider-driven grouping. Episode detail suppresses adjacent duplicate displayed timestamps and differentiates Intent, Transition, Intervention, and Decision with small semantic labels and node color.
+- Protection, Privacy & Accessibility, and Settings retain the existing information architecture and callbacks while using denser rhythm, moderate action geometry, and clearer disclosure question/answer hierarchy.
+- No runtime overlay, AccessibilityService, detector, policy, persistence, debug/developer UI, or product behavior changed in this pass.
+
+## Frontend/UI redesign pass
+
+Status: implementation, JVM/instrumented regression verification, debug/release builds, and static visual QA are complete. Runtime overlay captures and complete physical-device visual review remain pending because Android did not permit the automated test session to grant Accessibility access; those states require the developer's affirmative system-settings action.
+
+- The Compose frontend uses the shared Task Tunnel dark canvas, semantic color roles, typography, spacing tokens, reusable list rows, a two-destination shell, and secondary Settings/navigation surfaces.
+- Attention remains chronological and defaults to the app shell. Protection uses utility-style rows and health text. Episode detail uses the semantic causal path. Onboarding and privacy/accessibility disclosure use the same typography and spacing system.
+- The onboarding explanation rows keep the lead title in a weighted column with the supporting copy below it, so normal and larger text do not collapse into narrow vertical word columns. Attention and Protection list content include bottom breathing room above navigation controls.
+- Secondary screens now handle Android gesture/hardware Back consistently with their visible top-bar Back action.
+- Seven reviewed device captures are retained in `artifacts/frontend-redesign/`: Attention empty, Attention populated, Episode detail, Protection off/repair, corrected onboarding, Accessibility disclosure, and Settings/privacy. A Protection-active capture plus Purpose Gate, intervention, Drift check-in, and session-expiry captures still require Accessibility access to be enabled manually on a physical device.
+- The complete debug JVM suite passes 107 tests, the connected Android 16 instrumentation suite passes 2 tests, `:app:assembleDebug` and unsigned `:app:assembleRelease` pass, and `git diff --check` reports no whitespace errors.
+- No detector, policy, persistence, M0-M6 runtime behavior, or product feature was changed by this pass.
+
 ## M6 Hardening, Trust, Reliability, and External-Beta Readiness
 
 Status: automated implementation and repository verification are complete; physical M6 UX/runtime validation and external-device validation are pending. M0 through M4 remain physically validated per user confirmation. M5 remains implementation-complete with physical-device UX validation pending; M6 does not change that validation status.
