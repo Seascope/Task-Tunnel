@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +41,8 @@ import com.example.tasktunnel.ui.ReviewScreen
 import com.example.tasktunnel.ui.SecondaryScaffold
 import com.example.tasktunnel.ui.SettingsScreen
 import com.example.tasktunnel.ui.TaskTunnelScaffold
+import com.example.tasktunnel.ui.home.HomeScreen
+import com.example.tasktunnel.ui.home.HomeViewModel
 import com.example.tasktunnel.ui.theme.TaskTunnelTheme
 import com.example.tasktunnel.tunnel.IntentionalCheckInPreferences
 
@@ -56,8 +59,11 @@ class MainActivity : ComponentActivity() {
                 val runtime by AccessibilityRuntime.state.collectAsState()
                 val attentionViewModel: AttentionViewModel = viewModel()
                 val attention by attentionViewModel.uiState.collectAsState()
-                var destination by remember { mutableStateOf(MainDestination.ATTENTION) }
-                var lastPrimary by remember { mutableStateOf(MainDestination.ATTENTION) }
+                val homeViewModel: HomeViewModel = viewModel()
+                val home by homeViewModel.uiState.collectAsState()
+                LaunchedEffect(lifecycleRefresh) { homeViewModel.refresh() }
+                var destination by remember { mutableStateOf(MainDestination.HOME) }
+                var lastPrimary by remember { mutableStateOf(MainDestination.HOME) }
                 var selectedEpisodeId by remember { mutableStateOf<String?>(null) }
                 var disclosureReturn by remember { mutableStateOf(MainDestination.PROTECTION) }
                 var onboarding by remember { mutableStateOf(OnboardingPreferences.load(this@MainActivity)) }
@@ -116,7 +122,8 @@ class MainActivity : ComponentActivity() {
                     BackHandler(
                         enabled = destination != MainDestination.ATTENTION &&
                             destination != MainDestination.REVIEW &&
-                            destination != MainDestination.PROTECTION,
+                            destination != MainDestination.PROTECTION &&
+                            destination != MainDestination.HOME,
                     ) {
                         destination = when (destination) {
                             MainDestination.EPISODE -> MainDestination.ATTENTION
@@ -126,26 +133,30 @@ class MainActivity : ComponentActivity() {
                             MainDestination.DISCLOSURE -> disclosureReturn
                             MainDestination.DEVELOPER -> MainDestination.SETTINGS
                             MainDestination.INSPECTOR -> MainDestination.DEVELOPER
+                            MainDestination.HOME,
                             MainDestination.ATTENTION,
                             MainDestination.PROTECTION,
                             -> destination
                         }
                     }
                     when (destination) {
+                        MainDestination.HOME,
                         MainDestination.ATTENTION,
                         MainDestination.REVIEW,
                         MainDestination.PROTECTION,
                         -> {
                             val primary = when (destination) {
+                                MainDestination.HOME -> PrimaryDestination.HOME
                                 MainDestination.ATTENTION -> PrimaryDestination.ATTENTION
                                 MainDestination.REVIEW -> PrimaryDestination.REVIEW
                                 MainDestination.PROTECTION -> PrimaryDestination.PROTECTION
-                                else -> PrimaryDestination.ATTENTION
+                                else -> PrimaryDestination.HOME
                             }
                             TaskTunnelScaffold(
                                 destination = primary,
                                 onNavigate = {
                                     destination = when (it) {
+                                        PrimaryDestination.HOME -> MainDestination.HOME
                                         PrimaryDestination.ATTENTION -> MainDestination.ATTENTION
                                         PrimaryDestination.REVIEW -> MainDestination.REVIEW
                                         PrimaryDestination.PROTECTION -> MainDestination.PROTECTION
@@ -154,7 +165,18 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onOpenSettings = { destination = MainDestination.SETTINGS },
                             ) { contentModifier ->
-                                if (destination == MainDestination.ATTENTION) {
+                                if (destination == MainDestination.HOME) {
+                                    HomeScreen(
+                                        uiState = home,
+                                        health = snapshot.health,
+                                        refresh = homeViewModel::refresh,
+                                        turnProtectionOn = {
+                                            disclosureReturn = MainDestination.HOME
+                                            destination = MainDestination.DISCLOSURE
+                                        },
+                                        modifier = contentModifier,
+                                    )
+                                } else if (destination == MainDestination.ATTENTION) {
                                     AttentionScreen(
                                         uiState = attention,
                                         runtime = runtime,
@@ -260,6 +282,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class MainDestination {
+    HOME,
     ATTENTION,
     REVIEW,
     EPISODE,

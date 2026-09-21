@@ -18,10 +18,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -32,6 +35,9 @@ import com.example.tasktunnel.accessibility.ObservedInstagramDetection
 import com.example.tasktunnel.accessibility.ObservedYouTubeDetection
 import com.example.tasktunnel.accessibility.SanitizedNode
 import com.example.tasktunnel.accessibility.VisualQaOverlay
+import com.example.tasktunnel.attention.AttentionDatabase
+import com.example.tasktunnel.usage.SurfaceUsageInspectorState
+import com.example.tasktunnel.usage.SurfaceUsageRepository
 import com.example.tasktunnel.ui.theme.TaskTunnelTokens
 
 @Composable
@@ -42,6 +48,12 @@ fun DeveloperScreen(
     openInspector: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    val repository = remember { SurfaceUsageRepository(AttentionDatabase.getInstance(context).surfaceUsageSegmentDao()) }
+    var usage by remember { mutableStateOf<SurfaceUsageInspectorState?>(null) }
+    val scope = rememberCoroutineScope()
+    fun refreshUsage() { scope.launch { usage = repository.inspect(System.currentTimeMillis()) } }
+    LaunchedEffect(Unit) { refreshUsage() }
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(TaskTunnelTokens.ScreenHorizontalPadding), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Debug build only. These fields never appear in release UI.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         item {
@@ -60,6 +72,11 @@ fun DeveloperScreen(
         item { val current = runtime.currentInstagramDetection; InstagramDiagnosticCard(current ?: runtime.lastInstagramDetection, current != null) }
         item { FingerprintCopyAction("Copy sanitized Instagram fingerprint", (runtime.currentInstagramDetection ?: runtime.lastInstagramDetection)?.fingerprint) }
         item { Button(onClick = openInspector, enabled = runtime.connected) { Text("Open sanitized inspector") } }
+        item {
+            SurfaceUsageInspector(usage, { refreshUsage() }) {
+                scope.launch { repository.clear(); usage = repository.inspect(System.currentTimeMillis()) }
+            }
+        }
         item { Button(onClick = AccessibilityRuntime::requestTestOverlay, enabled = runtime.connected && !runtime.overlayPending) { Text(if (runtime.overlayPending) "Overlay scheduled…" else "Show test overlay in 3 seconds") } }
         item { Text("Visual QA overlays", style = MaterialTheme.typography.titleMedium) }
         item {
@@ -77,6 +94,48 @@ fun DeveloperScreen(
         if (runtime.packageHistory.isEmpty()) item { Text("None observed") }
         items(runtime.packageHistory) { Text("${it.packageName} — ${formatTime(it.observedAtMillis)}") }
     }
+}
+
+@Composable
+private fun SurfaceUsageInspector(
+    state: SurfaceUsageInspectorState?,
+    refresh: () -> Unit,
+    clear: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Surface usage — today", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = refresh) { Text("Refresh") }
+            Button(onClick = clear) { Text("Clear surface usage") }
+        }
+        state?.summaries?.forEach { summary ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(summary.app.displayName, style = MaterialTheme.typography.titleMedium)
+                    Text("Tracked ${formatUsageDuration(summary.totalTrackedDurationMillis)} · Classified ${formatUsageDuration(summary.classifiedDurationMillis)} · Unclassified ${formatUsageDuration(summary.unclassifiedDurationMillis)}")
+                    Text("Coverage ${(summary.coverage * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                    summary.bySurface.entries.filter { it.key != null }.forEach { (surface, duration) ->
+                        Text("${surface?.name}: ${formatUsageDuration(duration)}", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        Text("Recent segments", style = MaterialTheme.typography.titleMedium)
+        state?.recentSegments?.forEach { segment ->
+            Text(
+                "${segment.app.displayName} · ${segment.surface?.name ?: "Unclassified"}\n" +
+                    "${formatTime(segment.startedAtMillis)} -> ${formatTime(segment.endedAtMillis)} · ${formatUsageDuration(segment.endedAtMillis - segment.startedAtMillis)}\n" +
+                    "Task: ${segment.tunnelTask?.name ?: "No active Tunnel"} · ${segment.classification.name}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+private fun formatUsageDuration(durationMillis: Long): String {
+    val seconds = (durationMillis / 1_000L).coerceAtLeast(0L)
+    val minutes = seconds / 60
+    return if (minutes > 0) "${minutes}m ${seconds % 60}s" else "${seconds}s"
 }
 
 @Composable

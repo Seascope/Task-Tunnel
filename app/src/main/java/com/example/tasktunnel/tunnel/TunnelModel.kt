@@ -133,6 +133,13 @@ data class IntentionCheckInState(
     val shownCount: Int = 0,
     val nextCheckAtMillis: Long? = null,
     val suppressed: Boolean = false,
+    val consecutiveAllowCount: Int = 0,
+)
+
+data class DetourAllowState(
+    val sessionId: String,
+    val surface: DetectedSurface,
+    val count: Int,
 )
 
 data class TunnelRuntimeState(
@@ -143,6 +150,7 @@ data class TunnelRuntimeState(
     val returnCooldown: ReturnCooldown? = null,
     val checkIn: IntentionCheckInState? = null,
     val currentSurface: DetectedSurface? = null,
+    val detourAllow: DetourAllowState? = null,
     val leftProtectedAppAtMillis: Long? = null,
 )
 
@@ -183,6 +191,7 @@ class TunnelCoordinator(
                 returnCooldown = null,
                 checkIn = null,
                 currentSurface = null,
+                detourAllow = null,
                 leftProtectedAppAtMillis = null,
             )
             session.status == TunnelStatus.EXPIRED -> state = state.copy(
@@ -193,6 +202,7 @@ class TunnelCoordinator(
                 returnCooldown = null,
                 checkIn = null,
                 currentSurface = null,
+                detourAllow = null,
                 leftProtectedAppAtMillis = null,
             )
             app == session.app -> {
@@ -218,8 +228,11 @@ class TunnelCoordinator(
                         returnCooldown = state.returnCooldown?.takeIf {
                             it.sessionId == session.id && nowMillis < it.untilMillis
                         },
-                        checkIn = state.checkIn?.takeIf { it.sessionId == session.id },
+                        checkIn = state.checkIn?.takeIf {
+                            it.sessionId == session.id && (leftAt == null || it.kind != IntentionCheckInKind.DETOUR_RENEWAL)
+                        },
                         currentSurface = state.currentSurface,
+                        detourAllow = state.detourAllow?.takeIf { it.sessionId == session.id && leftAt == null },
                         leftProtectedAppAtMillis = null,
                     )
                 }
@@ -233,6 +246,7 @@ class TunnelCoordinator(
                 returnCooldown = null,
                 checkIn = null,
                 currentSurface = null,
+                detourAllow = null,
                 leftProtectedAppAtMillis = state.leftProtectedAppAtMillis ?: nowMillis,
             )
         }
@@ -265,6 +279,7 @@ class TunnelCoordinator(
             returnCooldown = null,
             checkIn = null,
             currentSurface = null,
+            detourAllow = null,
             leftProtectedAppAtMillis = null,
         )
         val session = state.activeSession
@@ -280,62 +295,99 @@ class TunnelCoordinator(
     }
 
     fun observeSurface(surface: DetectedSurface, nowMillis: Long) {
-        val activeCheckIn = state.checkIn
-        if (activeCheckIn?.kind == IntentionCheckInKind.DETOUR_RENEWAL && activeCheckIn.surface != surface) {
-            state = state.copy(checkIn = null, overrideScope = null)
+        val session = state.activeSession?.takeIf {
+            it.status == TunnelStatus.ACTIVE && it.app.packageName == state.foregroundPackage
+        }
+        val previousDetourSurface = session?.let { activeSession ->
+            when {
+                state.checkIn?.let {
+                    it.sessionId == activeSession.id &&
+                        it.kind == IntentionCheckInKind.DETOUR_RENEWAL
+                } == true -> state.checkIn?.surface
+                state.detourAllow?.let { it.sessionId == activeSession.id } == true -> state.detourAllow?.surface
+                else -> state.currentSurface?.takeIf {
+                    it != DetectedSurface.UNKNOWN &&
+                        SessionPolicy.evaluate(activeSession.task, it) == PolicyDecision.INTERVENE
+                }
+            }
+        }
+        if (surface != DetectedSurface.UNKNOWN && previousDetourSurface != null && previousDetourSurface != surface) {
+            val staleDetourPrompt = state.prompt as? TunnelPrompt.IntentionCheckIn
+            state = state.copy(
+                prompt = staleDetourPrompt?.takeUnless {
+                    it.kind == IntentionCheckInKind.DETOUR_RENEWAL && it.surface == previousDetourSurface
+                },
+                checkIn = state.checkIn?.takeUnless {
+                    it.kind == IntentionCheckInKind.DETOUR_RENEWAL && it.surface == previousDetourSurface
+                },
+                overrideScope = null,
+                detourAllow = null,
+            )
         }
         advanceTime(nowMillis)
         if (state.prompt is TunnelPrompt.IntentionCheckIn) return
-        val session = state.activeSession?.takeIf { it.status == TunnelStatus.ACTIVE } ?: return
-        if (session.app.packageName != state.foregroundPackage) return
+        val activeSession = state.activeSession?.takeIf { it.status == TunnelStatus.ACTIVE } ?: return
+        if (activeSession.app.packageName != state.foregroundPackage) return
 
-        val checkIn = state.checkIn?.takeIf { it.sessionId == session.id }
+        val checkIn = state.checkIn?.takeIf { it.sessionId == activeSession.id }
         val clearedCheckIn = checkIn?.takeIf {
             it.kind != IntentionCheckInKind.DETOUR_RENEWAL || it.surface == surface
         }
 
         val override = state.overrideScope?.takeIf {
-            it.sessionId == session.id && nowMillis < it.expiresAtMillis
+            it.sessionId == activeSession.id && nowMillis < it.expiresAtMillis
         }
         val cooldown = state.returnCooldown?.takeIf {
-            it.sessionId == session.id && it.surface == surface && nowMillis < it.untilMillis
+            it.sessionId == activeSession.id && it.surface == surface && nowMillis < it.untilMillis
         }
-        val decision = SessionPolicy.evaluate(session.task, surface)
+        val decision = SessionPolicy.evaluate(activeSession.task, surface)
         val prompt = when {
             decision != PolicyDecision.INTERVENE -> null
             override?.surface == surface -> null
             cooldown != null -> null
-            else -> TunnelPrompt.Intervention(session.id, session.task, surface)
+            else -> TunnelPrompt.Intervention(activeSession.id, activeSession.task, surface)
         }
         state = state.copy(
             prompt = prompt,
             overrideScope = override,
             returnCooldown = cooldown,
             checkIn = clearedCheckIn,
-            currentSurface = surface,
+            currentSurface = surface.takeIf { it != DetectedSurface.UNKNOWN } ?: state.currentSurface,
+            detourAllow = state.detourAllow?.takeIf { it.sessionId == activeSession.id && it.surface == surface },
         )
     }
 
     fun allowAnyway(nowMillis: Long) {
         val intervention = state.prompt as? TunnelPrompt.Intervention ?: return
         val session = state.activeSession?.takeIf { it.id == intervention.sessionId } ?: return
+        val previousCount = state.detourAllow?.takeIf {
+            it.sessionId == session.id && it.surface == intervention.surface
+        }?.count ?: state.checkIn?.takeIf {
+            it.sessionId == session.id &&
+                it.kind == IntentionCheckInKind.DETOUR_RENEWAL &&
+                it.surface == intervention.surface
+        }?.consecutiveAllowCount ?: 0
+        val allowCount = (previousCount + 1).coerceAtMost(MAX_ALLOW_BACKOFF_MULTIPLIER)
+        val overrideDuration = allowAnywayDurationMillis * allowCount
         state = state.copy(
             activeSession = session.copy(overrideOccurred = true),
             prompt = null,
             overrideScope = ScopedOverride(
                 sessionId = session.id,
                 surface = intervention.surface,
-                expiresAtMillis = nowMillis + allowAnywayDurationMillis,
+                expiresAtMillis = nowMillis + overrideDuration,
             ),
             checkIn = if (checkInsEnabled) {
                 IntentionCheckInState(
                     sessionId = session.id,
                     kind = IntentionCheckInKind.DETOUR_RENEWAL,
                     surface = intervention.surface,
-                    nextCheckAtMillis = nowMillis + allowAnywayDurationMillis,
+                    nextCheckAtMillis = nowMillis + overrideDuration,
+                    consecutiveAllowCount = allowCount,
                 )
             } else null,
             currentSurface = intervention.surface,
+            detourAllow = DetourAllowState(session.id, intervention.surface, allowCount),
             returnCooldown = null,
         )
     }
@@ -344,6 +396,7 @@ class TunnelCoordinator(
         val intervention = state.prompt as? TunnelPrompt.Intervention ?: return false
         state = state.copy(
             prompt = null,
+            detourAllow = null,
             returnCooldown = ReturnCooldown(
                 intervention.sessionId,
                 intervention.surface,
@@ -358,6 +411,7 @@ class TunnelCoordinator(
         state = state.copy(
             prompt = null,
             checkIn = null,
+            detourAllow = null,
             returnCooldown = checkIn.surface?.let {
                 ReturnCooldown(checkIn.sessionId, it, nowMillis + returnCooldownMillis)
             },
@@ -371,14 +425,21 @@ class TunnelCoordinator(
         val checkIn = state.checkIn?.takeIf { it.sessionId == session.id } ?: return
         val nextCount = prompt.shownCount
         val suppress = nextCount >= MAX_CHECK_INS
+        val allowCount = if (checkIn.kind == IntentionCheckInKind.DETOUR_RENEWAL) {
+            (checkIn.consecutiveAllowCount + 1).coerceAtMost(MAX_ALLOW_BACKOFF_MULTIPLIER)
+        } else checkIn.consecutiveAllowCount
+        val detourDuration = allowAnywayDurationMillis * allowCount.coerceAtLeast(1)
         val nextCheck = when {
             suppress -> null
-            checkIn.kind == IntentionCheckInKind.DETOUR_RENEWAL -> nowMillis + detourRenewalExtensionMillis
+            checkIn.kind == IntentionCheckInKind.DETOUR_RENEWAL -> nowMillis + detourDuration
             else -> nowMillis + browseCheckInIntervalMillis
         }
         state = state.copy(
             prompt = null,
-            checkIn = checkIn.copy(shownCount = nextCount, nextCheckAtMillis = nextCheck, suppressed = suppress),
+            checkIn = checkIn.copy(shownCount = nextCount, nextCheckAtMillis = nextCheck, suppressed = suppress, consecutiveAllowCount = allowCount),
+            detourAllow = if (checkIn.kind == IntentionCheckInKind.DETOUR_RENEWAL && checkIn.surface != null) {
+                DetourAllowState(session.id, checkIn.surface, allowCount)
+            } else state.detourAllow,
             overrideScope = if (checkIn.kind == IntentionCheckInKind.DETOUR_RENEWAL && checkIn.surface != null) {
                 ScopedOverride(session.id, checkIn.surface, nextCheck ?: Long.MAX_VALUE)
             } else state.overrideScope,
@@ -413,6 +474,7 @@ class TunnelCoordinator(
             returnCooldown = null,
             checkIn = null,
             currentSurface = null,
+            detourAllow = null,
             leftProtectedAppAtMillis = null,
         )
     }
@@ -426,6 +488,7 @@ class TunnelCoordinator(
             returnCooldown = null,
             checkIn = null,
             currentSurface = null,
+            detourAllow = null,
             leftProtectedAppAtMillis = null,
         )
     }
@@ -511,6 +574,7 @@ class TunnelCoordinator(
         const val DEFAULT_DETOUR_RENEWAL_EXTENSION_MILLIS = 10 * 60_000L
         const val DEFAULT_BROWSE_CHECK_IN_INTERVAL_MILLIS = 15 * 60_000L
         const val MAX_CHECK_INS = 2
+        const val MAX_ALLOW_BACKOFF_MULTIPLIER = 3
     }
 }
 

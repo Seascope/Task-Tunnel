@@ -31,6 +31,8 @@ Task Tunnel retains only structured local events needed for the product and Atte
 
 The selected Drift pool and minimal onboarding completion state are also stored locally.
 
+Task Tunnel may also retain bounded local history of detected supported-app surface durations. This contains only the app, semantic surface or an unclassified state, timestamps, and any active declared Tunnel task; it does not retain visible text or app content.
+
 ## What is not retained
 
 Task Tunnel does not retain:

@@ -3,12 +3,15 @@ package com.example.tasktunnel.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.content.res.ColorStateList
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.os.PowerManager
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -24,6 +27,7 @@ import com.example.tasktunnel.R
 import com.example.tasktunnel.attention.AttentionDecision
 import com.example.tasktunnel.attention.AttentionHistory
 import com.example.tasktunnel.attention.AttentionSubtype
+import com.example.tasktunnel.attention.AttentionDatabase
 import com.example.tasktunnel.detector.InstagramSurfaceDetector
 import com.example.tasktunnel.detector.InstagramSurface
 import com.example.tasktunnel.detector.YouTubeSurfaceDetector
@@ -47,6 +51,8 @@ import com.example.tasktunnel.tunnel.TunnelCoordinator
 import com.example.tasktunnel.tunnel.TunnelPrompt
 import com.example.tasktunnel.tunnel.TunnelTask
 import com.example.tasktunnel.tunnel.TunnelStatus
+import com.example.tasktunnel.usage.SurfaceUsageRepository
+import com.example.tasktunnel.usage.SurfaceUsageTracker
 import java.util.ArrayDeque
 
 class TaskTunnelAccessibilityService : AccessibilityService() {
@@ -56,6 +62,18 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private val adaptiveFrictionEngine = AdaptiveFrictionEngine()
     private val adaptiveFrictionStore by lazy { AdaptiveFrictionStore(applicationContext) }
     private val attentionRecorder by lazy { AttentionHistory.recorder(applicationContext) }
+    private val surfaceUsageTracker by lazy {
+        SurfaceUsageTracker(
+            SurfaceUsageRepository(AttentionDatabase.getInstance(applicationContext).surfaceUsageSegmentDao()),
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO.limitedParallelism(1)),
+        )
+    }
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context, intent: Intent) {
+            surfaceUsageTracker.setInteractive(intent.action == Intent.ACTION_SCREEN_ON, System.currentTimeMillis())
+        }
+    }
+    private var screenReceiverRegistered = false
     private var testOverlayView: LinearLayout? = null
     private var tunnelOverlayView: LinearLayout? = null
     private var driftOverlayView: LinearLayout? = null
@@ -83,6 +101,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         current = this
         driftCoordinator.updateSelectedPackages(DriftPoolPreferences.load(this))
         syncTunnelState { it.copy(connected = true, lastHeartbeatMillis = System.currentTimeMillis()) }
+        val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF) }
+        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(screenReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
+        else @Suppress("DEPRECATION") registerReceiver(screenReceiver, filter)
+        screenReceiverRegistered = true
+        surfaceUsageTracker.setInteractive(getSystemService(PowerManager::class.java).isInteractive, System.currentTimeMillis())
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -104,6 +127,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) AccessibilityRuntime.clearCurrentYouTubeDetection()
         if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
         val nowMillis = System.currentTimeMillis()
+        surfaceUsageTracker.foregroundChanged(packageName, nowMillis)
         tunnelCoordinator.observeForeground(packageName, nowMillis)
         driftCoordinator.observeForeground(
             packageName = packageName,
@@ -157,6 +181,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         removeTunnelOverlay()
         removeDriftOverlay()
         removeVisualQaOverlay()
+        surfaceUsageTracker.close(System.currentTimeMillis())
+        if (screenReceiverRegistered) {
+            runCatching { unregisterReceiver(screenReceiver) }
+            screenReceiverRegistered = false
+        }
         driftCoordinator.clear()
         if (current === this) current = null
         AccessibilityRuntime.update {
@@ -383,6 +412,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             }
             detection?.let {
                 val surface = it.surface.toTunnelSurface()
+                val task = tunnelCoordinator.state.activeSession?.takeIf { session -> session.app.packageName == packageName }?.task
+                surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
                 tunnelCoordinator.state.activeSession
                     ?.takeIf { session -> session.status == TunnelStatus.ACTIVE && session.app.packageName == packageName }
                     ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
@@ -390,6 +421,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             }
             instagramDetection?.let {
                 val surface = it.surface.toTunnelSurface()
+                val task = tunnelCoordinator.state.activeSession?.takeIf { session -> session.app.packageName == packageName }?.task
+                surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
                 tunnelCoordinator.state.activeSession
                     ?.takeIf { session -> session.status == TunnelStatus.ACTIVE && session.app.packageName == packageName }
                     ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
@@ -472,6 +505,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun failOpenCurrentSurface() {
+        surfaceUsageTracker.foregroundChanged(null, System.currentTimeMillis())
         tunnelCoordinator.observeSurface(DetectedSurface.UNKNOWN, System.currentTimeMillis())
         updateTunnelUi()
     }
@@ -521,6 +555,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             dimAmount = 0.42f
         }
         try {
+            surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
             getSystemService(WindowManager::class.java).addView(layout, params)
             val isPurposeGate = prompt is TunnelPrompt.PurposeGate
             if (isPurposeGate) {
@@ -579,6 +614,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             dimAmount = 0.32f
         }
         try {
+            surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
             getSystemService(WindowManager::class.java).addView(layout, params)
             animateOverlayEntrance(layout)
             driftOverlayView = layout
@@ -1241,18 +1277,22 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun removeTunnelOverlay() {
+        val hadOverlay = tunnelOverlayView != null
         tunnelOverlayView?.let { view ->
             try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
         }
         tunnelOverlayView = null
         shownTunnelPrompt = null
+        if (hadOverlay) surfaceUsageTracker.setOverlayVisible(false, System.currentTimeMillis())
     }
 
     private fun removeDriftOverlay() {
+        val hadOverlay = driftOverlayView != null
         driftOverlayView?.let { view ->
             try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
         }
         driftOverlayView = null
+        if (hadOverlay) surfaceUsageTracker.setOverlayVisible(false, System.currentTimeMillis())
     }
 
     private fun removeVisualQaOverlay() {

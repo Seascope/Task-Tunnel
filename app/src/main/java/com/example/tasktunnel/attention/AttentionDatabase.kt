@@ -16,6 +16,30 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 @Entity(
+    tableName = "surface_usage_segments",
+    indices = [Index("startedAtMillis"), Index("endedAtMillis"), Index("app"), Index("surface")],
+)
+data class SurfaceUsageSegmentEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val app: String,
+    val surface: String?,
+    val startedAtMillis: Long,
+    val endedAtMillis: Long,
+    val tunnelTask: String?,
+    val classification: String,
+)
+
+@Dao
+interface SurfaceUsageSegmentDao {
+    @Insert suspend fun insert(segment: SurfaceUsageSegmentEntity): Long
+    @Query("SELECT * FROM surface_usage_segments ORDER BY startedAtMillis DESC LIMIT :limit") suspend fun getRecent(limit: Int): List<SurfaceUsageSegmentEntity>
+    @Query("SELECT * FROM surface_usage_segments WHERE endedAtMillis > :startMillis AND startedAtMillis < :endMillis ORDER BY startedAtMillis ASC") suspend fun getForRange(startMillis: Long, endMillis: Long): List<SurfaceUsageSegmentEntity>
+    @Query("SELECT * FROM surface_usage_segments ORDER BY startedAtMillis DESC LIMIT :limit") fun observeRecent(limit: Int): Flow<List<SurfaceUsageSegmentEntity>>
+    @Query("DELETE FROM surface_usage_segments WHERE endedAtMillis < :cutoffMillis") suspend fun deleteOlderThan(cutoffMillis: Long)
+    @Query("DELETE FROM surface_usage_segments") suspend fun clear()
+}
+
+@Entity(
     tableName = "attention_events",
     indices = [Index("timestampMillis"), Index("tunnelId"), Index("driftEpisodeId")],
 )
@@ -54,9 +78,10 @@ interface AttentionEventDao {
     suspend fun clear()
 }
 
-@Database(entities = [AttentionEventEntity::class], version = 1, exportSchema = false)
+@Database(entities = [AttentionEventEntity::class, SurfaceUsageSegmentEntity::class], version = 2, exportSchema = false)
 abstract class AttentionDatabase : RoomDatabase() {
     abstract fun attentionEventDao(): AttentionEventDao
+    abstract fun surfaceUsageSegmentDao(): SurfaceUsageSegmentDao
 
     companion object {
         const val DATABASE_NAME = "attention-history.db"
@@ -68,7 +93,17 @@ abstract class AttentionDatabase : RoomDatabase() {
                 context.applicationContext,
                 AttentionDatabase::class.java,
                 DATABASE_NAME,
-            ).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+        }
+
+        val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+                database.execSQL("CREATE TABLE IF NOT EXISTS surface_usage_segments (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, app TEXT NOT NULL, surface TEXT, startedAtMillis INTEGER NOT NULL, endedAtMillis INTEGER NOT NULL, tunnelTask TEXT, classification TEXT NOT NULL)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_surface_usage_segments_startedAtMillis ON surface_usage_segments(startedAtMillis)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_surface_usage_segments_endedAtMillis ON surface_usage_segments(endedAtMillis)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_surface_usage_segments_app ON surface_usage_segments(app)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_surface_usage_segments_surface ON surface_usage_segments(surface)")
+            }
         }
     }
 }

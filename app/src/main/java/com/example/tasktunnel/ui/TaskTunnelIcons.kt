@@ -10,6 +10,7 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Timer
@@ -19,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 
 enum class TaskTunnelIconKind {
+    HOME,
     ATTENTION,
     REVIEW,
     PROTECTION,
@@ -40,6 +42,7 @@ fun TaskTunnelIcon(
     tint: Color = Color.Unspecified,
 ) {
     val imageVector = when (kind) {
+        TaskTunnelIconKind.HOME -> Icons.Outlined.Home
         TaskTunnelIconKind.ATTENTION -> Icons.Outlined.AccessTime
         TaskTunnelIconKind.REVIEW -> Icons.Outlined.Assessment
         TaskTunnelIconKind.PROTECTION -> Icons.Outlined.Shield

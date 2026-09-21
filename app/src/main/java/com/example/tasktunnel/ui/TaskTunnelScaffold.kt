@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
 enum class PrimaryDestination(val label: String) {
+    HOME("Home"),
     ATTENTION("Attention"),
     REVIEW("Review"),
     PROTECTION("Protection"),
@@ -66,6 +67,7 @@ fun TaskTunnelScaffold(
                             icon = {
                                 TaskTunnelIcon(
                                     when (item) {
+                                        PrimaryDestination.HOME -> TaskTunnelIconKind.HOME
                                         PrimaryDestination.ATTENTION -> TaskTunnelIconKind.ATTENTION
                                         PrimaryDestination.REVIEW -> TaskTunnelIconKind.REVIEW
                                         PrimaryDestination.PROTECTION -> TaskTunnelIconKind.PROTECTION

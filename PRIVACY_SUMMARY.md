@@ -14,6 +14,8 @@ Task Tunnel does not take screenshots. It does not need private message contents
 
 The Room database stores semantic Attention events only: time, event family/subtype, known app, known surface, selected task, Task Tunnel ID, Drift episode ID, explicit decision, and known involved apps.
 
+It also stores bounded local surface-usage segments for supported Instagram and YouTube surfaces: app, semantic surface or unclassified state, start/end timestamps, and optional declared Tunnel task. This metadata is used for local measurement only; it does not contain app content.
+
 Shared preferences store the selected Instagram/YouTube/Reddit Drift pool and minimal onboarding progress. Runtime detector observations, active Task Tunnel state, service heartbeat, sanitized debug snapshots, and developer fingerprints remain in memory.
 
 Attention database files, including SQLite journal files, and the Task Tunnel onboarding/Drift preferences are excluded from Android backup and device transfer by the project's backup/data-extraction rules.
