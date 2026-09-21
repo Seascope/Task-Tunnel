@@ -15,6 +15,7 @@ data class AttentionUiState(
     val metrics: AttentionMetrics = AttentionMetrics(0),
     val dailyRecap: DailyAttentionRecap = DailyAttentionRecap(),
     val review: AttentionReview = AttentionReview(DailyAttentionRecap(), emptyList(), null),
+    val sevenDayReview: SevenDayReview = SevenDayReview(ReviewPeriodSummary(0, 0, 0, 0, 0, 0), emptyList(), emptyList(), emptyList(), false),
     val historyAvailable: Boolean = true,
 )
 
@@ -34,11 +35,13 @@ class AttentionViewModel(application: Application) : AndroidViewModel(applicatio
         },
         historyAvailable,
     ) { events, driftCount, available ->
+        val nowMillis = System.currentTimeMillis()
         AttentionUiState(
             episodes = AttentionEpisodeGrouper.group(events),
             metrics = AttentionMetrics(driftCount),
-            dailyRecap = DailyAttentionRecap.from(events, System.currentTimeMillis()),
-            review = AttentionReview.from(events, System.currentTimeMillis()),
+            dailyRecap = DailyAttentionRecap.from(events, nowMillis),
+            review = AttentionReview.from(events, nowMillis),
+            sevenDayReview = SevenDayReview.from(events, nowMillis),
             historyAvailable = available,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AttentionUiState())

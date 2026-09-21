@@ -69,8 +69,9 @@ object AttentionPatternAnalyzer {
         events: List<AttentionEvent>,
         nowMillis: Long,
         timeZone: TimeZone = TimeZone.getDefault(),
+        historyDays: Int = PATTERN_HISTORY_DAYS,
     ): List<AttentionPattern> {
-        val window = PatternWindow.from(nowMillis, timeZone)
+        val window = PatternWindow.from(nowMillis, timeZone, historyDays)
         val recentEvents = events.filter { it.timestampMillis in window.startMillis..nowMillis }
         val recentEpisodes = AttentionEpisodeGrouper.group(recentEvents)
         val patterns = buildList {
@@ -228,14 +229,14 @@ object AttentionPatternAnalyzer {
 
 private data class PatternWindow(val startMillis: Long) {
     companion object {
-        fun from(nowMillis: Long, timeZone: TimeZone): PatternWindow {
+        fun from(nowMillis: Long, timeZone: TimeZone, historyDays: Int): PatternWindow {
             val start = Calendar.getInstance(timeZone).apply {
                 timeInMillis = nowMillis
                 set(Calendar.HOUR_OF_DAY, 0)
                 set(Calendar.MINUTE, 0)
                 set(Calendar.SECOND, 0)
                 set(Calendar.MILLISECOND, 0)
-                add(Calendar.DAY_OF_YEAR, -(PATTERN_HISTORY_DAYS - 1))
+                add(Calendar.DAY_OF_YEAR, -(historyDays - 1).coerceAtLeast(0))
             }
             return PatternWindow(start.timeInMillis)
         }

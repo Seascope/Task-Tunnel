@@ -167,7 +167,7 @@ class MainActivity : ComponentActivity() {
                                         modifier = contentModifier,
                                     )
                                 } else if (destination == MainDestination.REVIEW) {
-                                    ReviewScreen(attention.review, attention.historyAvailable, contentModifier)
+                                    ReviewScreen(attention.review, attention.sevenDayReview, attention.historyAvailable, contentModifier)
                                 } else {
                                     ProtectionScreen(
                                         snapshot = snapshot,

@@ -61,6 +61,11 @@ import com.example.tasktunnel.attention.AttentionPatternType
 import com.example.tasktunnel.attention.AttentionReview
 import com.example.tasktunnel.attention.AttentionUiState
 import com.example.tasktunnel.attention.DailyAttentionRecap
+import com.example.tasktunnel.attention.ReviewPeriod
+import com.example.tasktunnel.attention.ReviewDaySummary
+import com.example.tasktunnel.attention.ReviewPeriodSummary
+import com.example.tasktunnel.attention.ReviewTrend
+import com.example.tasktunnel.attention.SevenDayReview
 import com.example.tasktunnel.attention.episodeSubtitle
 import com.example.tasktunnel.attention.episodeTitle
 import com.example.tasktunnel.attention.eventDescription
@@ -142,8 +147,14 @@ private fun ProtectionRepairRow(health: ProtectionHealth, onRepair: () -> Unit) 
 }
 
 @Composable
-fun ReviewScreen(review: AttentionReview, historyAvailable: Boolean, modifier: Modifier = Modifier) {
-    if (!historyAvailable || !review.hasMeaningfulData) {
+fun ReviewScreen(
+    review: AttentionReview,
+    sevenDayReview: SevenDayReview,
+    historyAvailable: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    var selectedPeriod by remember { mutableStateOf(ReviewPeriod.TODAY) }
+    if (!historyAvailable || (!review.hasMeaningfulData && !sevenDayReview.hasMeaningfulHistory)) {
         Column(modifier.padding(TaskTunnelTokens.ScreenHorizontalPadding, 18.dp)) {
             Text("Nothing to review yet", style = MaterialTheme.typography.titleLarge)
             Text(
@@ -157,28 +168,128 @@ fun ReviewScreen(review: AttentionReview, historyAvailable: Boolean, modifier: M
     }
 
     Column(
-        modifier = modifier.padding(
+        modifier = modifier.verticalScroll(rememberScrollState()).padding(
             horizontal = TaskTunnelTokens.ScreenHorizontalPadding,
             vertical = 14.dp,
         ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SectionHeader("Today")
-        ReviewTodayHero(review.recap)
-        if (review.patterns.isNotEmpty()) {
-            SectionHeader("Patterns")
-            review.patterns.forEachIndexed { index, pattern ->
-                if (index > 0) RowDivider()
-                PatternRow(pattern, Modifier.padding(vertical = 10.dp))
+        ReviewPeriodSwitcher(selectedPeriod) { selectedPeriod = it }
+        when (selectedPeriod) {
+            ReviewPeriod.TODAY -> TodayReviewContent(review)
+            ReviewPeriod.SEVEN_DAYS -> SevenDayReviewContent(sevenDayReview)
+        }
+    }
+}
+
+@Composable
+private fun ReviewPeriodSwitcher(selected: ReviewPeriod, onSelected: (ReviewPeriod) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        ReviewPeriod.entries.forEach { period ->
+            TextButton(
+                onClick = { onSelected(period) },
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 2.dp),
+            ) {
+                Text(
+                    if (period == ReviewPeriod.TODAY) "Today" else "7 days",
+                    color = if (period == selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun TodayReviewContent(review: AttentionReview) {
+    SectionHeader("Today")
+    ReviewTodayHero(review.recap)
+    ReviewPatterns(review.patterns)
+}
+
+@Composable
+private fun SevenDayReviewContent(review: SevenDayReview) {
+    if (!review.hasMeaningfulHistory) {
+        SectionHeader("7 days")
+        Text("Not much to review yet.", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Your 7-day view will become more useful as Task Tunnel records more intentional sessions.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    SectionHeader("7 days")
+    ReviewSevenDayHero(review.summary)
+    SectionHeader("This week")
+    ReviewRhythm(review.days)
+    SectionHeader("Trends")
+    if (review.trends.isEmpty()) {
+        Text("Not enough earlier history to compare yet.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else {
+        review.trends.forEachIndexed { index, trend ->
+            if (index > 0) RowDivider()
+            ReviewTrendRow(trend, Modifier.padding(vertical = 9.dp))
+        }
+    }
+    ReviewPatterns(review.patterns)
+}
+
+@Composable
+private fun ReviewPatterns(patterns: List<AttentionPattern>) {
+    SectionHeader("Patterns")
+    if (patterns.isEmpty()) {
+        Text("A little more history is needed before patterns become useful.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
+    } else {
+        patterns.forEachIndexed { index, pattern ->
+            if (index > 0) RowDivider()
+            PatternRow(pattern, Modifier.padding(vertical = 10.dp))
+        }
+    }
+}
+
+@Composable
+private fun ReviewSevenDayHero(summary: ReviewPeriodSummary) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SurfaceGraphite).padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (summary.detours > 0) {
+            Text("${summary.returned} / ${summary.detours}", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary)
+            Text("detours ended with a return\nto your intention", style = MaterialTheme.typography.titleMedium)
         } else {
-            SectionHeader("Patterns")
-            Text(
-                "A little more history is needed before patterns become useful.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp),
-            )
+            Text("No detours interrupted in the last 7 days.", style = MaterialTheme.typography.titleMedium)
+        }
+        Text("${summary.intentionalSessions} sessions · ${summary.driftEpisodes} Drift ${pluralize(summary.driftEpisodes, "episode")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (summary.detours > 0) Text("${summary.returned} returned · ${summary.continued} continued · ${summary.ended} ended", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ReviewRhythm(days: List<ReviewDaySummary>) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+        days.forEach { day ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(day.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val dotColor = MaterialTheme.colorScheme.primary.copy(alpha = if (day.detours > 0) 1f else 0.3f)
+                Canvas(Modifier.size(20.dp)) { drawCircle(dotColor, if (day.detours > 0) 5.dp.toPx() else 3.dp.toPx(), center) }
+                Text(day.detours.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReviewTrendRow(trend: ReviewTrend, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        TaskTunnelIcon(TaskTunnelIconKind.ATTENTION, Modifier.size(20.dp), MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(11.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(trend.headline, style = MaterialTheme.typography.titleMedium)
+            Text(trend.supportingText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
