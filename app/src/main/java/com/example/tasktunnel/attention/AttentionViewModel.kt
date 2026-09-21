@@ -13,6 +13,8 @@ import kotlinx.coroutines.launch
 data class AttentionUiState(
     val episodes: List<AttentionEpisode> = emptyList(),
     val metrics: AttentionMetrics = AttentionMetrics(0),
+    val dailyRecap: DailyAttentionRecap = DailyAttentionRecap(),
+    val review: AttentionReview = AttentionReview(DailyAttentionRecap(), emptyList(), null),
     val historyAvailable: Boolean = true,
 )
 
@@ -35,6 +37,8 @@ class AttentionViewModel(application: Application) : AndroidViewModel(applicatio
         AttentionUiState(
             episodes = AttentionEpisodeGrouper.group(events),
             metrics = AttentionMetrics(driftCount),
+            dailyRecap = DailyAttentionRecap.from(events, System.currentTimeMillis()),
+            review = AttentionReview.from(events, System.currentTimeMillis()),
             historyAvailable = available,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AttentionUiState())

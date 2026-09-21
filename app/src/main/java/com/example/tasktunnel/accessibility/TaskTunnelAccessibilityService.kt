@@ -34,6 +34,11 @@ import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.drift.DriftCoordinator
 import com.example.tasktunnel.drift.DriftEpisode
 import com.example.tasktunnel.drift.DriftPoolPreferences
+import com.example.tasktunnel.friction.AdaptiveFrictionEngine
+import com.example.tasktunnel.friction.AdaptiveFrictionStore
+import com.example.tasktunnel.friction.FrictionContext
+import com.example.tasktunnel.friction.FrictionOutcome
+import com.example.tasktunnel.friction.InterventionVariant
 import com.example.tasktunnel.tunnel.DetectedSurface
 import com.example.tasktunnel.tunnel.SupportedApp
 import com.example.tasktunnel.tunnel.TunnelCoordinator
@@ -46,6 +51,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val tunnelCoordinator = TunnelCoordinator()
     private val driftCoordinator = DriftCoordinator(DriftAppCatalog.knownPackages)
+    private val adaptiveFrictionEngine = AdaptiveFrictionEngine()
+    private val adaptiveFrictionStore by lazy { AdaptiveFrictionStore(applicationContext) }
     private val attentionRecorder by lazy { AttentionHistory.recorder(applicationContext) }
     private var testOverlayView: LinearLayout? = null
     private var tunnelOverlayView: LinearLayout? = null
@@ -195,7 +202,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val layout = when (overlay) {
             VisualQaOverlay.PURPOSE_GATE -> purposeGateView(TunnelPrompt.PurposeGate(SupportedApp.INSTAGRAM))
             VisualQaOverlay.INTERVENTION -> interventionView(
-                TunnelPrompt.Intervention("visual-qa", TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.INSTAGRAM_REELS),
+                prompt = TunnelPrompt.Intervention(
+                    "visual-qa",
+                    TunnelTask.INSTAGRAM_MESSAGES,
+                    DetectedSurface.INSTAGRAM_REELS,
+                ),
+                variant = InterventionVariant.DIRECT,
+                learningEnabled = false,
             )
             VisualQaOverlay.DRIFT_CHECK_IN -> {
                 val packages = listOf("com.instagram.android", "com.reddit.frontpage", "com.google.android.youtube")
@@ -486,7 +499,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         AccessibilityRuntime.update { it.copy(overlayPending = false) }
         val layout = when (prompt) {
             is TunnelPrompt.PurposeGate -> purposeGateView(prompt)
-            is TunnelPrompt.Intervention -> interventionView(prompt)
+            is TunnelPrompt.Intervention -> interventionView(
+                prompt = prompt,
+                variant = chooseInterventionVariant(prompt),
+                learningEnabled = true,
+            )
             is TunnelPrompt.SessionExpired -> sessionExpiredView(prompt)
         }
         val params = WindowManager.LayoutParams(
@@ -659,11 +676,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         })
     }
 
-    private fun interventionView(prompt: TunnelPrompt.Intervention) = baseTunnelOverlay().apply {
+    private fun interventionView(
+        prompt: TunnelPrompt.Intervention,
+        variant: InterventionVariant,
+        learningEnabled: Boolean,
+    ) = baseTunnelOverlay().apply {
         val surface = surfaceLabel(prompt.surface)
+        val heading = interventionHeading(prompt, surface, variant)
+        val reminder = interventionReminder(prompt, surface, variant)
         addView(overlayAppIdentity(prompt.task.app))
-        addView(overlayText("$surface isn't part of this Tunnel", heading = true))
-        addView(overlayText(taskReminder(prompt.task), secondary = true))
+        addView(overlayText(heading, heading = true))
+        addView(overlayText(reminder, secondary = true))
         addView(overlayPrimaryButton(returnLabel(prompt.task)) {
             val session = tunnelCoordinator.state.activeSession
             val nowMillis = System.currentTimeMillis()
@@ -677,37 +700,118 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                         prompt.surface,
                     )
                 }
+                if (learningEnabled) {
+                    recordFrictionOutcome(prompt, variant, FrictionOutcome.RETURN)
+                }
                 updateTunnelUi()
                 performGlobalAction(GLOBAL_ACTION_BACK)
             }
         })
-        addView(overlayTextButton("Allow $surface for now") {
-            val nowMillis = System.currentTimeMillis()
-            tunnelCoordinator.state.activeSession?.let {
+
+        val allowLabel = "Allow $surface for now"
+        val allowAction = {
+            val session = tunnelCoordinator.state.activeSession?.takeIf {
+                it.id == prompt.sessionId && tunnelCoordinator.state.prompt == prompt
+            }
+            if (session != null) {
+                val nowMillis = System.currentTimeMillis()
                 attentionRecorder.tunnelDecision(
-                    it,
+                    session,
                     AttentionSubtype.ALLOW_ANYWAY,
                     AttentionDecision.ALLOW_ANYWAY,
                     nowMillis,
                     prompt.surface,
                 )
+                if (learningEnabled) {
+                    recordFrictionOutcome(prompt, variant, FrictionOutcome.ALLOW_ANYWAY)
+                }
+                tunnelCoordinator.allowAnyway(nowMillis)
+                updateTunnelUi()
             }
-            tunnelCoordinator.allowAnyway(nowMillis)
-            updateTunnelUi()
-        })
+        }
+        addView(
+            if (variant == InterventionVariant.SHORT_PAUSE) {
+                overlayDelayedTextButton(
+                    label = allowLabel,
+                    delayMillis = AdaptiveFrictionEngine.SHORT_PAUSE_MILLIS,
+                    action = allowAction,
+                )
+            } else {
+                overlayTextButton(allowLabel, action = allowAction)
+            },
+        )
+
         addView(overlayTextButton("End Tunnel", quiet = true) {
-            tunnelCoordinator.state.activeSession?.let {
+            val session = tunnelCoordinator.state.activeSession?.takeIf {
+                it.id == prompt.sessionId && tunnelCoordinator.state.prompt == prompt
+            }
+            if (session != null) {
                 attentionRecorder.tunnelDecision(
-                    it,
+                    session,
                     AttentionSubtype.END_TUNNEL,
                     AttentionDecision.END_TUNNEL,
                     System.currentTimeMillis(),
                     prompt.surface,
                 )
+                if (learningEnabled) {
+                    recordFrictionOutcome(prompt, variant, FrictionOutcome.END_TUNNEL)
+                }
+                tunnelCoordinator.endSession()
+                updateTunnelUi()
             }
-            tunnelCoordinator.endSession()
-            updateTunnelUi()
         })
+    }
+
+    private fun chooseInterventionVariant(prompt: TunnelPrompt.Intervention): InterventionVariant {
+        val context = FrictionContext.from(prompt.task, prompt.surface)
+        return adaptiveFrictionEngine.chooseVariant(adaptiveFrictionStore.load(context))
+    }
+
+    private fun recordFrictionOutcome(
+        prompt: TunnelPrompt.Intervention,
+        variant: InterventionVariant,
+        outcome: FrictionOutcome,
+    ) {
+        val context = FrictionContext.from(prompt.task, prompt.surface)
+        val currentProfile = adaptiveFrictionStore.load(context)
+        val updatedProfile = adaptiveFrictionEngine.recordOutcome(currentProfile, variant, outcome)
+        adaptiveFrictionStore.save(context, updatedProfile)
+    }
+
+    private fun interventionHeading(
+        prompt: TunnelPrompt.Intervention,
+        surface: String,
+        variant: InterventionVariant,
+    ): String = when (variant) {
+        InterventionVariant.INTENT_RECALL -> when (prompt.task) {
+            TunnelTask.INSTAGRAM_MESSAGES -> "Still here to reply?"
+            TunnelTask.YOUTUBE_SEARCH_WATCH -> "Still here for something specific?"
+            TunnelTask.INSTAGRAM_BROWSE,
+            TunnelTask.YOUTUBE_BROWSE,
+            -> "$surface isn't part of this Tunnel"
+        }
+        InterventionVariant.DIRECT,
+        InterventionVariant.SHORT_PAUSE,
+        -> "$surface isn't part of this Tunnel"
+    }
+
+    private fun interventionReminder(
+        prompt: TunnelPrompt.Intervention,
+        surface: String,
+        variant: InterventionVariant,
+    ): String = when (variant) {
+        InterventionVariant.INTENT_RECALL -> when (prompt.task) {
+            TunnelTask.INSTAGRAM_MESSAGES ->
+                "You opened Instagram to reply to messages. $surface is outside that purpose."
+            TunnelTask.YOUTUBE_SEARCH_WATCH ->
+                "You opened YouTube to search for or watch something. $surface is outside that purpose."
+            TunnelTask.INSTAGRAM_BROWSE,
+            TunnelTask.YOUTUBE_BROWSE,
+            -> taskReminder(prompt.task)
+        }
+        InterventionVariant.DIRECT,
+        InterventionVariant.SHORT_PAUSE,
+        -> taskReminder(prompt.task)
     }
 
     private fun sessionExpiredView(prompt: TunnelPrompt.SessionExpired) = baseTunnelOverlay().apply {
@@ -818,6 +922,36 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         isFocusable = true
         setBackgroundResource(android.R.drawable.list_selector_background)
         setOnClickListener { action() }
+    }
+
+    private fun overlayDelayedTextButton(
+        label: String,
+        delayMillis: Long,
+        action: () -> Unit,
+    ): TextView {
+        val button = overlayTextButton(label, action = action)
+        val unlockAtElapsed = SystemClock.elapsedRealtime() + delayMillis
+        button.isEnabled = false
+        button.alpha = 0.48f
+
+        val updateCountdown = object : Runnable {
+            override fun run() {
+                val remainingMillis = unlockAtElapsed - SystemClock.elapsedRealtime()
+                if (remainingMillis <= 0L) {
+                    button.text = label
+                    button.contentDescription = label
+                    button.isEnabled = true
+                    button.alpha = 1f
+                    return
+                }
+                val remainingSeconds = ((remainingMillis + 999L) / 1_000L).coerceAtLeast(1L)
+                button.text = "$label · ${remainingSeconds}s"
+                button.contentDescription = "$label. Available in $remainingSeconds seconds."
+                handler.postDelayed(this, minOf(remainingMillis, 250L))
+            }
+        }
+        handler.post(updateCountdown)
+        return button
     }
 
     private fun overlayChoiceRow(label: String, action: (View) -> Unit) = TextView(this).apply {

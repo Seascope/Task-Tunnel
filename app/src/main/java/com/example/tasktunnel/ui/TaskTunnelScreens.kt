@@ -41,6 +41,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
@@ -55,10 +56,17 @@ import com.example.tasktunnel.attention.AttentionEpisode
 import com.example.tasktunnel.attention.AttentionEpisodeType
 import com.example.tasktunnel.attention.AttentionEvent
 import com.example.tasktunnel.attention.AttentionEventType
+import com.example.tasktunnel.attention.AttentionPattern
+import com.example.tasktunnel.attention.AttentionPatternType
+import com.example.tasktunnel.attention.AttentionReview
 import com.example.tasktunnel.attention.AttentionUiState
+import com.example.tasktunnel.attention.DailyAttentionRecap
 import com.example.tasktunnel.attention.episodeSubtitle
 import com.example.tasktunnel.attention.episodeTitle
 import com.example.tasktunnel.attention.eventDescription
+import com.example.tasktunnel.attention.patternHeadline
+import com.example.tasktunnel.attention.patternSupportingText
+import com.example.tasktunnel.attention.surfaceLabel
 import com.example.tasktunnel.attention.taskLabel
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.onboarding.OnboardingProgress
@@ -72,6 +80,7 @@ import com.example.tasktunnel.protection.ProtectionLevel
 import com.example.tasktunnel.protection.ProtectionSnapshot
 import com.example.tasktunnel.ui.theme.HealthyGreen
 import com.example.tasktunnel.ui.theme.LimitedAmber
+import com.example.tasktunnel.ui.theme.SurfaceGraphite
 import com.example.tasktunnel.ui.theme.TaskTunnelTokens
 import java.util.Calendar
 
@@ -88,23 +97,13 @@ fun AttentionScreen(
     val earlier = uiState.episodes.filterNot { isToday(it.startedAtMillis) }
     LazyColumn(
         modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = TaskTunnelTokens.ScreenHorizontalPadding,
-            top = 8.dp,
-            end = TaskTunnelTokens.ScreenHorizontalPadding,
-            bottom = 28.dp,
-        ),
+        contentPadding = PaddingValues(start = TaskTunnelTokens.ScreenHorizontalPadding, top = 8.dp, end = TaskTunnelTokens.ScreenHorizontalPadding, bottom = 28.dp),
     ) {
         item {
-            Column {
-                ProtectionStatusLine(health, showSummary = false)
-                if (health.level == ProtectionLevel.OFF) {
-                    TextButton(onClick = reviewProtection, modifier = Modifier.height(40.dp).padding(top = 2.dp)) {
-                        Text("Review Protection")
-                    }
-                }
+            if (health.level != ProtectionLevel.ACTIVE) {
+                ProtectionRepairRow(health, reviewProtection)
+                Spacer(Modifier.height(6.dp))
             }
-            Spacer(Modifier.height(20.dp))
         }
         runtime.tunnelState.activeSession?.let { session ->
             item {
@@ -114,21 +113,9 @@ fun AttentionScreen(
         }
         item { SectionHeader("Today", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap)) }
         when {
-            !uiState.historyAvailable -> item {
-                ErrorNotice(
-                    "Attention history is unavailable",
-                    "Protection can still run. Reopen Task Tunnel and check diagnostics if this continues.",
-                )
-            }
-            uiState.episodes.isEmpty() -> item {
-                EmptyState(
-                    "No episodes yet",
-                    "Intentions, meaningful transitions, Drift check-ins, and your choices will appear here. History stays on this device.",
-                )
-            }
-            today.isEmpty() -> item {
-                EmptyState("Nothing recorded today", "Recent episodes are available below.")
-            }
+            !uiState.historyAvailable -> item { ErrorNotice("Attention history is unavailable", "Protection can still run. Reopen Task Tunnel and check diagnostics if this continues.") }
+            uiState.episodes.isEmpty() -> item { EmptyState("No episodes yet", "Intentions, meaningful transitions, Drift check-ins, and your choices will appear here. History stays on this device.") }
+            today.isEmpty() -> item { EmptyState("Nothing recorded today", "Recent episodes are available below.") }
             else -> episodeItems(today, openEpisode)
         }
         if (earlier.isNotEmpty()) {
@@ -138,24 +125,121 @@ fun AttentionScreen(
             }
             episodeItems(earlier, openEpisode)
         }
-        if (uiState.historyAvailable) {
-            item {
-                Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-                SectionHeader("This week", Modifier.padding(bottom = 10.dp))
-                Text(
-                    "${uiState.metrics.driftEpisodesLastSevenDays} drift ${if (uiState.metrics.driftEpisodesLastSevenDays == 1) "episode" else "episodes"}",
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                Text(
-                    "A local count of check-ins, not a score.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 3.dp, bottom = 24.dp),
-                )
-            }
+    }
+}
+
+@Composable
+private fun ProtectionRepairRow(health: ProtectionHealth, onRepair: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ProtectionStatusLine(health, showSummary = false, modifier = Modifier.weight(1f))
+        TextButton(onClick = onRepair, modifier = Modifier.height(40.dp)) {
+            Text("Fix")
         }
     }
 }
+
+@Composable
+fun ReviewScreen(review: AttentionReview, historyAvailable: Boolean, modifier: Modifier = Modifier) {
+    if (!historyAvailable || !review.hasMeaningfulData) {
+        Column(modifier.padding(TaskTunnelTokens.ScreenHorizontalPadding, 18.dp)) {
+            Text("Nothing to review yet", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Your daily recap will appear after Task Tunnel records some intentional sessions.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        return
+    }
+
+    Column(
+        modifier = modifier.padding(
+            horizontal = TaskTunnelTokens.ScreenHorizontalPadding,
+            vertical = 14.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionHeader("Today")
+        ReviewTodayHero(review.recap)
+        if (review.patterns.isNotEmpty()) {
+            SectionHeader("Patterns")
+            review.patterns.forEachIndexed { index, pattern ->
+                if (index > 0) RowDivider()
+                PatternRow(pattern, Modifier.padding(vertical = 10.dp))
+            }
+        } else {
+            SectionHeader("Patterns")
+            Text(
+                "A little more history is needed before patterns become useful.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReviewTodayHero(recap: DailyAttentionRecap) {
+    Column(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SurfaceGraphite).padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (recap.detoursInterrupted > 0) {
+            Text("${recap.recoveredIntentions} / ${recap.detoursInterrupted}", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary)
+            Text("detours ended with a return\nto your intention", style = MaterialTheme.typography.titleMedium)
+        } else {
+            Text(recap.intentionalSessions.toString(), style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.primary)
+            Text("intentional ${pluralize(recap.intentionalSessions, "session")} today", style = MaterialTheme.typography.titleMedium)
+            Text("No detours interrupted today.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("${recap.intentionalSessions} sessions", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("·", color = MaterialTheme.colorScheme.outline)
+            Text("${recap.driftEpisodes} Drift ${pluralize(recap.driftEpisodes, "episode")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (recap.detoursInterrupted > 0) {
+            Text("${recap.recoveredIntentions} returned · ${recap.consciousDetours} continued · ${recap.endedTunnels} ended", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun PatternRow(pattern: AttentionPattern, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        PatternMarker(pattern)
+        Spacer(Modifier.width(11.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(patternHeadline(pattern), style = MaterialTheme.typography.titleMedium)
+            Text(patternSupportingText(pattern), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun PatternMarker(pattern: AttentionPattern) {
+    Column(Modifier.width(46.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (pattern.app != null && pattern.type in setOf(AttentionPatternType.COMMON_DETOUR_SURFACE, AttentionPatternType.RECOVERY_AFTER_SURFACE)) {
+            AppIcon(pattern.app.packageName, pattern.app.displayName, Modifier.size(25.dp))
+        } else {
+            TaskTunnelIcon(TaskTunnelIconKind.ATTENTION, Modifier.size(23.dp), MaterialTheme.colorScheme.primary)
+        }
+        Text(patternLabel(pattern), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+private fun patternLabel(pattern: AttentionPattern): String = when (pattern.type) {
+    AttentionPatternType.COMMON_DETOUR_SURFACE -> surfaceLabel(pattern.surface).uppercase()
+    AttentionPatternType.RECOVERY_AFTER_SURFACE -> "RETURNING"
+    AttentionPatternType.RECURRING_DRIFT_PATH -> "DRIFT PATH"
+    AttentionPatternType.TIME_OF_DAY_DRIFT -> "DRIFT TIMING"
+}
+
+private fun pluralize(count: Int, singular: String): String = if (count == 1) singular else "${singular}s"
 
 private fun androidx.compose.foundation.lazy.LazyListScope.episodeItems(
     episodes: List<AttentionEpisode>,
@@ -205,12 +289,7 @@ fun EpisodeDetailScreen(episode: AttentionEpisode?, modifier: Modifier = Modifie
             }
             item { EpisodePath(episode.events) }
             item {
-                Text(
-                    "This history stays on this device.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 24.dp, bottom = 20.dp),
-                )
+                Text("This history stays on this device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 24.dp, bottom = 20.dp))
             }
         }
     }
@@ -221,12 +300,7 @@ fun EpisodePath(events: List<AttentionEvent>, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxWidth()) {
         events.forEachIndexed { index, event ->
             val previousTimestamp = events.getOrNull(index - 1)?.let { formatTime(it.timestampMillis) }
-            EpisodePathNode(
-                event = event,
-                showTimestamp = formatTime(event.timestampMillis) != previousTimestamp,
-                first = index == 0,
-                last = index == events.lastIndex,
-            )
+            EpisodePathNode(event, formatTime(event.timestampMillis) != previousTimestamp, index == 0, index == events.lastIndex)
         }
     }
 }
@@ -241,13 +315,10 @@ private fun EpisodePathNode(event: AttentionEvent, showTimestamp: Boolean, first
         AttentionEventType.DECISION -> HealthyGreen
     }
     val canvasColor = MaterialTheme.colorScheme.background
-    Row(Modifier.fillMaxWidth().heightIn(min = 66.dp).padding(bottom = 8.dp)) {
-        Text(
-            if (showTimestamp) formatTime(event.timestampMillis) else "",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(58.dp).padding(top = 4.dp),
-        )
+    Row(Modifier.fillMaxWidth().heightIn(min = 42.dp)) {
+        Column(Modifier.width(64.dp).padding(top = 2.dp), horizontalAlignment = Alignment.End) {
+            if (showTimestamp) Text(formatTime(event.timestampMillis), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Box(Modifier.width(30.dp).fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             Canvas(Modifier.fillMaxSize()) {
                 val x = size.width / 2f

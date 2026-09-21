@@ -3,6 +3,7 @@ package com.example.tasktunnel.ui
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccessTime
 import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Assessment
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -19,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 
 enum class TaskTunnelIconKind {
     ATTENTION,
+    REVIEW,
     PROTECTION,
     SETTINGS,
     BACK,
@@ -39,6 +41,7 @@ fun TaskTunnelIcon(
 ) {
     val imageVector = when (kind) {
         TaskTunnelIconKind.ATTENTION -> Icons.Outlined.AccessTime
+        TaskTunnelIconKind.REVIEW -> Icons.Outlined.Assessment
         TaskTunnelIconKind.PROTECTION -> Icons.Outlined.Shield
         TaskTunnelIconKind.SETTINGS -> Icons.Outlined.Settings
         TaskTunnelIconKind.BACK -> Icons.Outlined.ArrowBack

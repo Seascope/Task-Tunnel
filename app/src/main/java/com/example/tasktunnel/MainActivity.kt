@@ -36,6 +36,7 @@ import com.example.tasktunnel.ui.InspectorScreen
 import com.example.tasktunnel.ui.OnboardingScreen
 import com.example.tasktunnel.ui.PrimaryDestination
 import com.example.tasktunnel.ui.ProtectionScreen
+import com.example.tasktunnel.ui.ReviewScreen
 import com.example.tasktunnel.ui.SecondaryScaffold
 import com.example.tasktunnel.ui.SettingsScreen
 import com.example.tasktunnel.ui.TaskTunnelScaffold
@@ -112,10 +113,12 @@ class MainActivity : ComponentActivity() {
                 } else {
                     BackHandler(
                         enabled = destination != MainDestination.ATTENTION &&
+                            destination != MainDestination.REVIEW &&
                             destination != MainDestination.PROTECTION,
                     ) {
                         destination = when (destination) {
                             MainDestination.EPISODE -> MainDestination.ATTENTION
+                            MainDestination.REVIEW -> MainDestination.REVIEW
                             MainDestination.SETTINGS -> lastPrimary
                             MainDestination.DIAGNOSTICS -> MainDestination.SETTINGS
                             MainDestination.DISCLOSURE -> disclosureReturn
@@ -128,13 +131,23 @@ class MainActivity : ComponentActivity() {
                     }
                     when (destination) {
                         MainDestination.ATTENTION,
+                        MainDestination.REVIEW,
                         MainDestination.PROTECTION,
                         -> {
-                            val primary = if (destination == MainDestination.ATTENTION) PrimaryDestination.ATTENTION else PrimaryDestination.PROTECTION
+                            val primary = when (destination) {
+                                MainDestination.ATTENTION -> PrimaryDestination.ATTENTION
+                                MainDestination.REVIEW -> PrimaryDestination.REVIEW
+                                MainDestination.PROTECTION -> PrimaryDestination.PROTECTION
+                                else -> PrimaryDestination.ATTENTION
+                            }
                             TaskTunnelScaffold(
                                 destination = primary,
                                 onNavigate = {
-                                    destination = if (it == PrimaryDestination.ATTENTION) MainDestination.ATTENTION else MainDestination.PROTECTION
+                                    destination = when (it) {
+                                        PrimaryDestination.ATTENTION -> MainDestination.ATTENTION
+                                        PrimaryDestination.REVIEW -> MainDestination.REVIEW
+                                        PrimaryDestination.PROTECTION -> MainDestination.PROTECTION
+                                    }
                                     lastPrimary = destination
                                 },
                                 onOpenSettings = { destination = MainDestination.SETTINGS },
@@ -151,6 +164,8 @@ class MainActivity : ComponentActivity() {
                                         },
                                         modifier = contentModifier,
                                     )
+                                } else if (destination == MainDestination.REVIEW) {
+                                    ReviewScreen(attention.review, attention.historyAvailable, contentModifier)
                                 } else {
                                     ProtectionScreen(
                                         snapshot = snapshot,
@@ -239,6 +254,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class MainDestination {
     ATTENTION,
+    REVIEW,
     EPISODE,
     PROTECTION,
     SETTINGS,

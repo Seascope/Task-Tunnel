@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 
 enum class PrimaryDestination(val label: String) {
     ATTENTION("Attention"),
+    REVIEW("Review"),
     PROTECTION("Protection"),
 }
 
@@ -64,7 +65,11 @@ fun TaskTunnelScaffold(
                             onClick = { onNavigate(item) },
                             icon = {
                                 TaskTunnelIcon(
-                                    if (item == PrimaryDestination.ATTENTION) TaskTunnelIconKind.ATTENTION else TaskTunnelIconKind.PROTECTION,
+                                    when (item) {
+                                        PrimaryDestination.ATTENTION -> TaskTunnelIconKind.ATTENTION
+                                        PrimaryDestination.REVIEW -> TaskTunnelIconKind.REVIEW
+                                        PrimaryDestination.PROTECTION -> TaskTunnelIconKind.PROTECTION
+                                    },
                                     Modifier.size(23.dp),
                                     if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
