@@ -41,6 +41,7 @@ import com.example.tasktunnel.ui.SecondaryScaffold
 import com.example.tasktunnel.ui.SettingsScreen
 import com.example.tasktunnel.ui.TaskTunnelScaffold
 import com.example.tasktunnel.ui.theme.TaskTunnelTheme
+import com.example.tasktunnel.tunnel.IntentionalCheckInPreferences
 
 class MainActivity : ComponentActivity() {
     private var serviceEnabled by mutableStateOf(false)
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
                 var disclosureReturn by remember { mutableStateOf(MainDestination.PROTECTION) }
                 var onboarding by remember { mutableStateOf(OnboardingPreferences.load(this@MainActivity)) }
                 var selectedDriftPackages by remember { mutableStateOf(DriftPoolPreferences.load(this@MainActivity)) }
+                var intentionalCheckInsEnabled by remember { mutableStateOf(IntentionalCheckInPreferences.load(this@MainActivity)) }
 
                 val saveOnboarding: (OnboardingProgress) -> Unit = { progress ->
                     onboarding = progress
@@ -170,6 +172,11 @@ class MainActivity : ComponentActivity() {
                                     ProtectionScreen(
                                         snapshot = snapshot,
                                         selectedDriftPackages = selectedDriftPackages,
+                                        intentionalCheckInsEnabled = intentionalCheckInsEnabled,
+                                        setIntentionalCheckInsEnabled = {
+                                            intentionalCheckInsEnabled = it
+                                            IntentionalCheckInPreferences.save(this@MainActivity, it)
+                                        },
                                         setDriftEnabled = setDriftEnabled,
                                         setDriftAppEnabled = setDriftAppEnabled,
                                         repairAccessibility = {

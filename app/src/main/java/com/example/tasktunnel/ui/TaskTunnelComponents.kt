@@ -237,9 +237,14 @@ private fun episodeOutcome(episode: AttentionEpisode): String? {
         AttentionSubtype.EXPIRY_CHOOSE_ANOTHER -> "Chose another purpose"
         AttentionSubtype.KEEP_GOING -> "Kept going after the check-in"
         AttentionSubtype.SET_INTENTION -> "Set an intention after the check-in"
+        AttentionSubtype.CHECK_IN_RETURN -> "Returned to the original purpose"
+        AttentionSubtype.CHECK_IN_CONTINUE -> "Chose to continue intentionally"
+        AttentionSubtype.CHECK_IN_END -> "Ended the Task Tunnel"
+        AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER -> "Chose another purpose"
         else -> when (intervention?.subtype) {
             AttentionSubtype.DRIFT_CHECK_IN -> "A gentle check-in was shown"
             AttentionSubtype.SURFACE_INTERVENTION -> interruptedSurface?.let { "$it needed a decision" }
+            AttentionSubtype.CHECK_IN_SHOWN -> "An intentional check-in was shown"
             else -> null
         }
     }

@@ -349,6 +349,8 @@ private fun AttentionEventType.timelineLabel(): String = when (this) {
 fun ProtectionScreen(
     snapshot: ProtectionSnapshot,
     selectedDriftPackages: Set<String>,
+    intentionalCheckInsEnabled: Boolean,
+    setIntentionalCheckInsEnabled: (Boolean) -> Unit,
     setDriftEnabled: (Boolean) -> Unit,
     setDriftAppEnabled: (String, Boolean) -> Unit,
     repairAccessibility: () -> Unit,
@@ -394,6 +396,19 @@ fun ProtectionScreen(
             }
         }
         item {
+            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
+            SectionHeader("Intentional check-ins", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = TaskTunnelTokens.RowVerticalPadding),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
+                    Text("Ask again after a while", style = MaterialTheme.typography.titleMedium)
+                    Text("Ask again when a detour or open-ended browse has been running for a while.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = intentionalCheckInsEnabled, onCheckedChange = setIntentionalCheckInsEnabled)
+            }
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("Drift Detection", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
             DriftConfigurationSection(selectedDriftPackages, setDriftEnabled, setDriftAppEnabled)

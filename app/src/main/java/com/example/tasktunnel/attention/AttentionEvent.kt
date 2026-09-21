@@ -43,6 +43,11 @@ enum class AttentionSubtype {
     EXPIRY_FINISH,
     EXPIRY_CONTINUE,
     EXPIRY_CHOOSE_ANOTHER,
+    CHECK_IN_SHOWN,
+    CHECK_IN_RETURN,
+    CHECK_IN_CONTINUE,
+    CHECK_IN_END,
+    CHECK_IN_CHOOSE_ANOTHER,
 }
 
 enum class AttentionDecision {
@@ -54,6 +59,10 @@ enum class AttentionDecision {
     FINISH,
     CONTINUE,
     CHOOSE_ANOTHER_PURPOSE,
+    CHECK_IN_RETURN,
+    CHECK_IN_CONTINUE,
+    CHECK_IN_END,
+    CHECK_IN_CHOOSE_ANOTHER,
 }
 
 data class AttentionEvent(

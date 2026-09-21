@@ -69,9 +69,22 @@ class AttentionEventSemantics {
                 task = prompt.task,
                 tunnelId = prompt.sessionId,
             )
+            is TunnelPrompt.IntentionCheckIn -> AttentionEvent(
+                timestampMillis = nowMillis,
+                type = AttentionEventType.INTERVENTION,
+                subtype = AttentionSubtype.CHECK_IN_SHOWN,
+                app = session?.app?.let(AttentionApp::fromSupported),
+                surface = prompt.surface,
+                task = prompt.task,
+                tunnelId = prompt.sessionId,
+            )
             is TunnelPrompt.PurposeGate -> return null
         }
-        val key = "${event.tunnelId}:${event.subtype}:${event.surface}"
+        val key = when (prompt) {
+            is TunnelPrompt.IntentionCheckIn ->
+                "${event.tunnelId}:${event.subtype}:${event.surface}:${prompt.shownCount}"
+            else -> "${event.tunnelId}:${event.subtype}:${event.surface}"
+        }
         return event.takeIf { shownInterventions.add(key) }
     }
 

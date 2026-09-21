@@ -45,6 +45,11 @@ fun eventDescription(event: AttentionEvent): String = when (event.subtype) {
     AttentionSubtype.EXPIRY_FINISH -> "Chose Finish"
     AttentionSubtype.EXPIRY_CONTINUE -> "Chose Continue"
     AttentionSubtype.EXPIRY_CHOOSE_ANOTHER -> "Chose another purpose"
+    AttentionSubtype.CHECK_IN_SHOWN -> "Intentional check-in"
+    AttentionSubtype.CHECK_IN_RETURN -> "Returned to your intention"
+    AttentionSubtype.CHECK_IN_CONTINUE -> "Chose to continue"
+    AttentionSubtype.CHECK_IN_END -> "Ended the Task Tunnel"
+    AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER -> "Chose another purpose"
 }
 
 fun episodeTitle(episode: AttentionEpisode): String = when (episode.type) {

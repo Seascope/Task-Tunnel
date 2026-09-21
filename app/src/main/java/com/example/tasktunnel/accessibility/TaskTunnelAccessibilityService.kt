@@ -40,6 +40,8 @@ import com.example.tasktunnel.friction.FrictionContext
 import com.example.tasktunnel.friction.FrictionOutcome
 import com.example.tasktunnel.friction.InterventionVariant
 import com.example.tasktunnel.tunnel.DetectedSurface
+import com.example.tasktunnel.tunnel.IntentionCheckInKind
+import com.example.tasktunnel.tunnel.IntentionalCheckInPreferences
 import com.example.tasktunnel.tunnel.SupportedApp
 import com.example.tasktunnel.tunnel.TunnelCoordinator
 import com.example.tasktunnel.tunnel.TunnelPrompt
@@ -475,6 +477,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun updateTunnelUi() {
+        tunnelCoordinator.setCheckInsEnabled(IntentionalCheckInPreferences.load(applicationContext))
         syncTunnelState()
         refreshTunnelOverlay()
         refreshDriftOverlay()
@@ -505,6 +508,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 learningEnabled = true,
             )
             is TunnelPrompt.SessionExpired -> sessionExpiredView(prompt)
+            is TunnelPrompt.IntentionCheckIn -> intentionCheckInView(prompt)
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -760,6 +764,77 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 updateTunnelUi()
             }
         })
+    }
+
+    private fun intentionCheckInView(prompt: TunnelPrompt.IntentionCheckIn) = baseTunnelOverlay().apply {
+        val session = tunnelCoordinator.state.activeSession
+        val app = prompt.task.app
+        val surface = prompt.surface?.let(::surfaceLabel)
+        addView(overlayAppIdentity(app))
+        if (prompt.kind == IntentionCheckInKind.DETOUR_RENEWAL) {
+            addView(overlayText(
+                when (prompt.surface) {
+                    DetectedSurface.INSTAGRAM_EXPLORE -> "Still exploring intentionally?"
+                    else -> "Still watching intentionally?"
+                },
+                heading = true,
+            ))
+            addView(overlayText("You chose to spend a few minutes in ${surface ?: "this screen"}.", secondary = true))
+            addView(overlayPrimaryButton(returnLabel(prompt.task)) {
+                if (tunnelCoordinator.state.prompt != prompt) return@overlayPrimaryButton
+                val nowMillis = System.currentTimeMillis()
+                if (tunnelCoordinator.returnFromCheckIn(nowMillis)) {
+                    session?.let {
+                        attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_RETURN, AttentionDecision.CHECK_IN_RETURN, nowMillis, prompt.surface)
+                    }
+                    updateTunnelUi()
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
+            })
+            addView(overlayTextButton(if (prompt.surface == DetectedSurface.INSTAGRAM_EXPLORE) "Keep exploring" else "Keep watching") {
+                if (tunnelCoordinator.state.prompt != prompt) return@overlayTextButton
+                session?.let {
+                    attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_CONTINUE, AttentionDecision.CHECK_IN_CONTINUE, System.currentTimeMillis(), prompt.surface)
+                }
+                tunnelCoordinator.continueCheckIn(System.currentTimeMillis())
+                updateTunnelUi()
+            })
+            addView(overlayTextButton("End Tunnel", quiet = true) {
+                if (tunnelCoordinator.state.prompt != prompt) return@overlayTextButton
+                session?.let {
+                    attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_END, AttentionDecision.CHECK_IN_END, System.currentTimeMillis(), prompt.surface)
+                }
+                tunnelCoordinator.endSession()
+                updateTunnelUi()
+            })
+        } else {
+            addView(overlayText("Still browsing intentionally?", heading = true))
+            addView(overlayText("You chose to browse without a time limit.", secondary = true))
+            addView(overlayPrimaryButton("Keep browsing") {
+                if (tunnelCoordinator.state.prompt != prompt) return@overlayPrimaryButton
+                session?.let {
+                    attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_CONTINUE, AttentionDecision.CHECK_IN_CONTINUE, System.currentTimeMillis())
+                }
+                tunnelCoordinator.continueCheckIn(System.currentTimeMillis())
+                updateTunnelUi()
+            })
+            addView(overlayTextButton("Choose another purpose") {
+                if (tunnelCoordinator.state.prompt != prompt) return@overlayTextButton
+                session?.let {
+                    attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER, AttentionDecision.CHECK_IN_CHOOSE_ANOTHER, System.currentTimeMillis())
+                }
+                tunnelCoordinator.chooseAnotherPurpose()
+                updateTunnelUi()
+            })
+            addView(overlayTextButton("Finish", quiet = true) {
+                if (tunnelCoordinator.state.prompt != prompt) return@overlayTextButton
+                session?.let {
+                    attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_END, AttentionDecision.CHECK_IN_END, System.currentTimeMillis())
+                }
+                tunnelCoordinator.endSession()
+                updateTunnelUi()
+            })
+        }
     }
 
     private fun chooseInterventionVariant(prompt: TunnelPrompt.Intervention): InterventionVariant {
