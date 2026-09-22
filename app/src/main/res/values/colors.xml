@@ -2,4 +2,8 @@
 <resources>
     <color name="task_tunnel_canvas">#101214</color>
     <color name="task_tunnel_blue">#79AFFF</color>
+    <color name="notification_text_primary">#FF1F2328</color>
+    <color name="notification_text_secondary">#FF646A73</color>
+    <color name="notification_action_background">#14000000</color>
+    <color name="notification_progress_track">#22000000</color>
 </resources>

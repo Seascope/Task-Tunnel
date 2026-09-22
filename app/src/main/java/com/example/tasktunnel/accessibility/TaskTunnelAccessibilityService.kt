@@ -105,6 +105,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             }
         }
     }
+    private val notificationProgressRefresh = object : Runnable {
+        override fun run() {
+            tunnelNotificationController.sync(tunnelCoordinator.state)
+            scheduleNotificationProgressRefresh()
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -197,6 +203,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(showOverlay)
         handler.removeCallbacks(trailingCapture)
         handler.removeCallbacks(tunnelDeadline)
+        handler.removeCallbacks(notificationProgressRefresh)
         removeTestOverlay()
         removeTunnelOverlay()
         removeDriftOverlay()
@@ -689,6 +696,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         refreshDriftOverlay()
         scheduleTunnelDeadline()
         tunnelNotificationController.sync(tunnelCoordinator.state)
+        scheduleNotificationProgressRefresh()
+    }
+
+    private fun scheduleNotificationProgressRefresh() {
+        handler.removeCallbacks(notificationProgressRefresh)
+        if (!tunnelNotificationController.shouldRefreshProgress(tunnelCoordinator.state)) return
+        handler.postDelayed(notificationProgressRefresh, TunnelNotificationController.PROGRESS_REFRESH_MILLIS)
     }
 
     private fun scheduleTunnelDeadline() {

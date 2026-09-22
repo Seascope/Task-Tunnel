@@ -4,7 +4,7 @@
 
 Status: stabilized implementation in the working tree; physical notification validation required.
 
-- An active Task Tunnel posts a silent low-importance notification only while a session exists. Timed sessions use Android's countdown chronometer; open-ended sessions show **No time limit**. Lock-screen public content is reduced to **Task Tunnel active**.
+- An active Task Tunnel posts a silent low-importance notification only while a session exists. The expanded view uses a Hevy-style control hierarchy: current purpose as the primary line, app/state beneath it, the protected app icon, a live countdown plus remaining-time progress bar for timed tunnels, and large rounded controls. Open-ended sessions show **No time limit**. Lock-screen public content is reduced to **Task Tunnel active**.
 - Normal and temporary-detour/intervention actions are **Change purpose** and **End**. Expired/open-ended check-in states expose **Continue**, **Change purpose**, and **End**.
 - Notification actions no longer launch a trampoline Activity or a second control overlay. On Android 12+ the AccessibilityService dismisses the notification shade with `GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE`, waits until the protected app is actually foreground, and only then shows/changing tunnel UI. This avoids SystemUI/foreground lifecycle races.
 - **Change purpose** preserves the original tunnel while the chooser is open and inherits the actual remaining timer when a purpose is selected. Re-selecting the current purpose creates a fresh session with the same remaining time, clearing any temporary detour allowance and effectively recommitting to that purpose. **Keep current purpose** cancels the replacement safely.
