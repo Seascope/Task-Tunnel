@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.dp
 import com.example.tasktunnel.protection.ProtectionHealth
 import com.example.tasktunnel.protection.ProtectionLevel
 import com.example.tasktunnel.ui.AppIcon
-import com.example.tasktunnel.ui.packageName
 import com.example.tasktunnel.ui.theme.TaskTunnelTokens
 
 private val ReelsVideo = Color(0xFF83A9CF)

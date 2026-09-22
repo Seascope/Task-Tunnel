@@ -5,18 +5,18 @@ M4 automated implementation is complete. This guide is for physical-device valid
 ## Setup
 
 1. Install the current debug APK and enable the Task Tunnel accessibility service.
-2. Open Task Tunnel and enable Instagram, YouTube, and Reddit under **Drift check-in apps**.
-3. Confirm all three apps are installed and signed in enough to open normally.
+2. Open Task Tunnel and enable Instagram, YouTube, TikTok, and Reddit under **Drift check-in apps**.
+3. Confirm the apps needed for the sequence you are testing are installed and signed in enough to open normally.
 4. End any active Task Tunnel before beginning Drift tests.
-5. When an Instagram or YouTube Purpose Gate has higher priority, choose **Not now** to reveal any pending Drift check-in.
+5. End any ordinary Purpose Gate before starting only if you want a completely clean screen. A qualifying Drift check-in now takes priority over an ordinary Purpose Gate automatically.
 
 The beta trigger is three distinct selected apps within 60 seconds. A quiet period of 60 seconds resets an acknowledged episode.
 
 ## Basic positive case
 
 1. Switch from Instagram to Reddit to YouTube within 60 seconds.
-2. If the YouTube Purpose Gate appears, choose **Not now**.
-3. Verify exactly one soft Drift check-in appears.
+2. Verify the YouTube Purpose Gate does **not** replace the qualifying Drift check-in.
+3. Verify exactly one soft Drift check-in appears automatically.
 4. Verify the heading says **Looking for something?**.
 5. Verify the message names Instagram, Reddit, and YouTube; it must not show package IDs.
 6. Verify the available actions are **Set an intention** and **Keep going**.
@@ -37,7 +37,7 @@ The beta trigger is three distinct selected apps within 60 seconds. A quiet peri
 ### Instagram
 
 1. End a qualifying sequence on Instagram.
-2. If Instagram's Purpose Gate is already visible, choose **Not now** so the pending Drift check-in can appear.
+2. Verify Drift appears instead of the ordinary Instagram Purpose Gate.
 3. Tap **Set an intention**.
 4. Verify the Instagram Purpose Gate appears.
 5. Verify no purpose is auto-selected.
@@ -86,7 +86,18 @@ Exercise switching while each of these existing Task Tunnel overlays is visible:
 - incompatible-surface intervention
 - session-expiry re-decision
 
-Verify the Drift check-in never stacks on top. The Task Tunnel interaction must retain priority. After dismissing a Purpose Gate with **Not now**, a qualifying pending Drift check-in may appear once.
+Verify the priority order is:
+
+1. active-Tunnel intervention / expiry / check-in
+2. Drift check-in
+3. ordinary Purpose Gate
+
+A qualifying Drift check-in should replace an ordinary Purpose Gate rather than stacking over it. Drift must still never replace an interaction belonging to an active Tunnel. Tap **Keep going** on Drift and verify the displaced Purpose Gate does not immediately appear afterward. Tap **Set an intention** on Drift and verify a fresh Purpose Gate appears intentionally.
+
+Also verify both of these exact sequences trigger Drift when all apps are enabled in the Drift pool:
+
+- Reddit -> Instagram -> YouTube
+- Instagram -> YouTube -> TikTok
 
 ## Background, unrelated apps, and lifecycle
 

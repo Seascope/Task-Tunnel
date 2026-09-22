@@ -362,8 +362,20 @@ class TunnelCoordinator(
     }
 
     fun requestPurposeGate(app: SupportedApp): Boolean {
-        if (state.activeSession != null || state.foregroundPackage != app.packageName) return false
-        state = state.copy(prompt = TunnelPrompt.PurposeGate(app))
+        if (state.foregroundPackage != app.packageName) return false
+        val activeSession = state.activeSession
+        if (activeSession?.app == app) return false
+        state = state.copy(
+            activeSession = null,
+            prompt = TunnelPrompt.PurposeGate(app),
+            overrideScope = null,
+            returnCooldown = null,
+            checkIn = null,
+            currentSurface = null,
+            currentSurfaceObservedAtMillis = null,
+            detourAllow = null,
+            leftProtectedAppAtMillis = null,
+        )
         return true
     }
 

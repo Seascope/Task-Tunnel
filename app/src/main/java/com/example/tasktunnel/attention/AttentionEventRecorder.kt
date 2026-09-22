@@ -112,7 +112,8 @@ class AttentionEventSemantics {
 
     fun driftCheckInShown(episode: DriftEpisode, nowMillis: Long): List<AttentionEvent> {
         if (!shownDriftEpisodes.add(episode.id)) return emptyList()
-        val apps = episode.involvedPackages.mapNotNull(AttentionApp::fromPackage).distinct()
+        val packages = episode.involvedPackages.distinct()
+        val apps = packages.mapNotNull(AttentionApp::fromPackage)
         return listOf(
             AttentionEvent(
                 timestampMillis = episode.startedAtMillis,
@@ -120,6 +121,7 @@ class AttentionEventSemantics {
                 subtype = AttentionSubtype.DRIFT_SEQUENCE,
                 driftEpisodeId = episode.id,
                 relatedApps = apps,
+                relatedPackages = packages,
             ),
             AttentionEvent(
                 timestampMillis = nowMillis,
@@ -128,6 +130,7 @@ class AttentionEventSemantics {
                 app = episode.involvedPackages.lastOrNull()?.let(AttentionApp::fromPackage),
                 driftEpisodeId = episode.id,
                 relatedApps = apps,
+                relatedPackages = packages,
             ),
         )
     }
@@ -146,6 +149,7 @@ class AttentionEventSemantics {
         driftEpisodeId = episode.id,
         decision = decision,
         relatedApps = episode.involvedPackages.mapNotNull(AttentionApp::fromPackage).distinct(),
+        relatedPackages = episode.involvedPackages.distinct(),
     )
 
     companion object {

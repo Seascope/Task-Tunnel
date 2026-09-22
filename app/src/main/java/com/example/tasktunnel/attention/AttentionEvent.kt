@@ -6,21 +6,16 @@ import com.example.tasktunnel.tunnel.TunnelTask
 
 enum class AttentionEventType { INTENT, TRANSITION, INTERVENTION, DECISION }
 
-enum class AttentionApp(val displayName: String) {
-    INSTAGRAM("Instagram"),
-    YOUTUBE("YouTube"),
-    TIKTOK("TikTok"),
-    REDDIT("Reddit"),
+enum class AttentionApp(val displayName: String, val packageName: String) {
+    INSTAGRAM("Instagram", SupportedApp.INSTAGRAM.packageName),
+    YOUTUBE("YouTube", SupportedApp.YOUTUBE.packageName),
+    TIKTOK("TikTok", SupportedApp.TIKTOK.packageName),
+    REDDIT("Reddit", "com.reddit.frontpage"),
     ;
 
     companion object {
-        fun fromPackage(packageName: String?): AttentionApp? = when (packageName) {
-            SupportedApp.INSTAGRAM.packageName -> INSTAGRAM
-            SupportedApp.YOUTUBE.packageName -> YOUTUBE
-            SupportedApp.TIKTOK.packageName -> TIKTOK
-            "com.reddit.frontpage" -> REDDIT
-            else -> null
-        }
+        fun fromPackage(packageName: String?): AttentionApp? =
+            values().firstOrNull { it.packageName == packageName }
 
         fun fromSupported(app: SupportedApp): AttentionApp = when (app) {
             SupportedApp.INSTAGRAM -> INSTAGRAM
@@ -80,4 +75,6 @@ data class AttentionEvent(
     val driftEpisodeId: String? = null,
     val decision: AttentionDecision? = null,
     val relatedApps: List<AttentionApp> = emptyList(),
+    /** Exact app packages for Drift history. Unlike [relatedApps], this is not limited to known apps. */
+    val relatedPackages: List<String> = emptyList(),
 )

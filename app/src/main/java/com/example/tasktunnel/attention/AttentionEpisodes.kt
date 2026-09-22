@@ -1,5 +1,6 @@
 package com.example.tasktunnel.attention
 
+import com.example.tasktunnel.drift.DriftPolicy
 import com.example.tasktunnel.tunnel.TunnelTask
 
 enum class AttentionEpisodeType { TASK_TUNNEL, DRIFT }
@@ -12,6 +13,7 @@ data class AttentionEpisode(
     val app: AttentionApp?,
     val task: TunnelTask?,
     val involvedApps: List<AttentionApp>,
+    val involvedPackages: List<String>,
     val events: List<AttentionEvent>,
 )
 
@@ -24,13 +26,27 @@ object AttentionEpisodeGrouper {
                 else -> "event:${event.id}:${event.timestampMillis}"
             }
         }
-        .map { (key, grouped) ->
+        .mapNotNull { (key, grouped) ->
             val ordered = grouped.sortedWith(compareBy(AttentionEvent::timestampMillis, AttentionEvent::id))
             val type = if (ordered.any { it.tunnelId != null }) {
                 AttentionEpisodeType.TASK_TUNNEL
             } else {
                 AttentionEpisodeType.DRIFT
             }
+            val involvedPackages = ordered.flatMap { event ->
+                event.relatedPackages.ifEmpty { event.relatedApps.map(AttentionApp::packageName) }
+            }.distinct()
+
+            // DriftDetector only emits an episode after the configured distinct-app threshold is
+            // reached. Older database rows could not persist arbitrary packages, so a historical
+            // Drift episode may reconstruct with only one or two apps. Do not surface those
+            // incomplete legacy rows as if they were real one/two-app Drift detections.
+            if (type == AttentionEpisodeType.DRIFT &&
+                involvedPackages.size < DriftPolicy.DEFAULT_DISTINCT_APP_THRESHOLD
+            ) {
+                return@mapNotNull null
+            }
+
             AttentionEpisode(
                 id = key,
                 type = type,
@@ -39,6 +55,7 @@ object AttentionEpisodeGrouper {
                 app = ordered.firstNotNullOfOrNull { it.app },
                 task = ordered.firstNotNullOfOrNull { it.task },
                 involvedApps = ordered.flatMap { it.relatedApps }.distinct(),
+                involvedPackages = involvedPackages,
                 events = ordered,
             )
         }

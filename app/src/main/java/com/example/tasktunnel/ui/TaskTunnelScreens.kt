@@ -30,7 +30,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -73,6 +75,7 @@ import com.example.tasktunnel.attention.patternHeadline
 import com.example.tasktunnel.attention.patternSupportingText
 import com.example.tasktunnel.attention.surfaceLabel
 import com.example.tasktunnel.attention.taskLabel
+import com.example.tasktunnel.drift.KnownDriftApp
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.onboarding.OnboardingProgress
 import com.example.tasktunnel.onboarding.OnboardingStep
@@ -380,6 +383,7 @@ private fun ActiveTunnelNotice(packageName: String, appName: String, task: Strin
 
 @Composable
 fun EpisodeDetailScreen(episode: AttentionEpisode?, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
     LazyColumn(
         modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 14.dp),
@@ -388,12 +392,26 @@ fun EpisodeDetailScreen(episode: AttentionEpisode?, modifier: Modifier = Modifie
             item { EmptyState("Episode unavailable", "This episode is no longer in recent history.") }
         } else {
             item {
+                val subtitle = if (episode.type == AttentionEpisodeType.DRIFT && episode.involvedPackages.isNotEmpty()) {
+                    episode.involvedPackages.joinToString(" → ") { packageName ->
+                        DriftAppCatalog.labelFor(context, packageName)
+                    }
+                } else {
+                    episodeSubtitle(episode)
+                }
                 Text(formatEpisodeRange(episode), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(episodeTitle(episode), style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(top = 6.dp).semantics { heading() })
-                Text(episodeSubtitle(episode), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
-                if (episode.type == AttentionEpisodeType.DRIFT && episode.involvedApps.isNotEmpty()) {
+                Text(subtitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                if (episode.type == AttentionEpisodeType.DRIFT && episode.involvedPackages.isNotEmpty()) {
                     Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        episode.involvedApps.forEach { app -> AppIdentity(app.packageName, app.displayName, showName = false, iconSize = 30.dp) }
+                        episode.involvedPackages.take(3).forEach { packageName ->
+                            AppIdentity(
+                                packageName = packageName,
+                                displayName = DriftAppCatalog.labelFor(context, packageName),
+                                showName = false,
+                                iconSize = 30.dp,
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(20.dp))
@@ -418,6 +436,7 @@ fun EpisodePath(events: List<AttentionEvent>, modifier: Modifier = Modifier) {
 
 @Composable
 private fun EpisodePathNode(event: AttentionEvent, showTimestamp: Boolean, first: Boolean, last: Boolean) {
+    val context = LocalContext.current
     val lineColor = MaterialTheme.colorScheme.outline
     val nodeColor = when (event.type) {
         AttentionEventType.INTENT -> MaterialTheme.colorScheme.primary
@@ -441,8 +460,15 @@ private fun EpisodePathNode(event: AttentionEvent, showTimestamp: Boolean, first
         }
         Column(Modifier.weight(1f).padding(top = 1.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(event.type.timelineLabel(), style = MaterialTheme.typography.labelSmall, color = nodeColor)
-            Text(eventDescription(event), style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (event.relatedApps.isNotEmpty() && event.app == null) {
+            val description = if (event.subtype == com.example.tasktunnel.attention.AttentionSubtype.DRIFT_SEQUENCE && event.relatedPackages.isNotEmpty()) {
+                event.relatedPackages.joinToString(" → ") { packageName ->
+                    DriftAppCatalog.labelFor(context, packageName)
+                }
+            } else {
+                eventDescription(event)
+            }
+            Text(description, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (event.relatedApps.isNotEmpty() && event.relatedPackages.isEmpty() && event.app == null) {
                 Text(event.relatedApps.joinToString(" → ") { it.displayName }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -460,6 +486,7 @@ private fun AttentionEventType.timelineLabel(): String = when (this) {
 fun ProtectionScreen(
     snapshot: ProtectionSnapshot,
     selectedDriftPackages: Set<String>,
+    availableDriftApps: List<KnownDriftApp>,
     intentionalCheckInsEnabled: Boolean,
     setIntentionalCheckInsEnabled: (Boolean) -> Unit,
     setDriftEnabled: (Boolean) -> Unit,
@@ -526,7 +553,12 @@ fun ProtectionScreen(
             }
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("Drift Detection", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
-            DriftConfigurationSection(selectedDriftPackages, setDriftEnabled, setDriftAppEnabled)
+            DriftConfigurationSection(
+                selectedPackages = selectedDriftPackages,
+                availableApps = availableDriftApps,
+                setDriftEnabled = setDriftEnabled,
+                setAppEnabled = setDriftAppEnabled,
+            )
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("System", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
             SettingsRow(
@@ -572,10 +604,25 @@ private fun ProtectedAppRow(app: InstalledAppStatus, intentions: String) {
 @Composable
 fun DriftConfigurationSection(
     selectedPackages: Set<String>,
+    availableApps: List<KnownDriftApp>,
     setDriftEnabled: (Boolean) -> Unit,
     setAppEnabled: (String, Boolean) -> Unit,
 ) {
+    var showAppPicker by remember { mutableStateOf(false) }
     val enabled = selectedPackages.isNotEmpty()
+    val availablePackages = availableApps.mapTo(hashSetOf()) { it.packageName }
+    val selectedApps = availableApps.filter { it.packageName in selectedPackages }
+    val hiddenSelectionCount = selectedPackages.count { it !in availablePackages }
+
+    if (showAppPicker) {
+        DriftAppPickerDialog(
+            apps = availableApps,
+            selectedPackages = selectedPackages,
+            setAppEnabled = setAppEnabled,
+            dismiss = { showAppPicker = false },
+        )
+    }
+
     Row(
         Modifier.fillMaxWidth().padding(vertical = TaskTunnelTokens.RowVerticalPadding),
         verticalAlignment = Alignment.CenterVertically,
@@ -588,20 +635,95 @@ fun DriftConfigurationSection(
         Switch(checked = enabled, onCheckedChange = setDriftEnabled)
     }
     if (enabled) {
-        DriftAppCatalog.apps.forEachIndexed { index, app ->
-            if (index > 0) RowDivider(inset = true)
-            Row(
-                Modifier.fillMaxWidth().clickable { setAppEnabled(app.packageName, app.packageName !in selectedPackages) }
-                    .padding(vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AppIcon(app.packageName, app.displayName, Modifier.size(32.dp))
-                Spacer(Modifier.width(TaskTunnelTokens.IconTextGap))
-                Text(app.displayName, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                Switch(checked = app.packageName in selectedPackages, onCheckedChange = { setAppEnabled(app.packageName, it) })
-            }
+        val visibleSummary = when {
+            selectedApps.isEmpty() && hiddenSelectionCount > 0 -> "$hiddenSelectionCount unavailable ${pluralize(hiddenSelectionCount, "app")} selected"
+            selectedApps.isEmpty() -> "Choose which apps count toward Drift"
+            selectedApps.size <= 3 && hiddenSelectionCount == 0 -> selectedApps.joinToString(", ") { it.displayName }
+            else -> "${selectedApps.size + hiddenSelectionCount} ${pluralize(selectedApps.size + hiddenSelectionCount, "app")} selected"
+        }
+        SettingsRow(
+            title = "Apps included",
+            subtitle = visibleSummary,
+            trailingText = (selectedApps.size + hiddenSelectionCount).toString(),
+            showChevron = true,
+            onClick = { showAppPicker = true },
+        )
+    }
+}
+
+@Composable
+private fun DriftAppPickerDialog(
+    apps: List<KnownDriftApp>,
+    selectedPackages: Set<String>,
+    setAppEnabled: (String, Boolean) -> Unit,
+    dismiss: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val normalizedQuery = query.trim()
+    val filteredApps = if (normalizedQuery.isEmpty()) {
+        apps
+    } else {
+        apps.filter {
+            it.displayName.contains(normalizedQuery, ignoreCase = true) ||
+                it.packageName.contains(normalizedQuery, ignoreCase = true)
         }
     }
+
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Apps in Drift Detection") },
+        text = {
+            Column {
+                Text(
+                    "Choose any installed app whose rapid switching should count toward Drift.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
+                    singleLine = true,
+                    label = { Text("Search apps") },
+                )
+                if (filteredApps.isEmpty()) {
+                    Text(
+                        "No matching apps found.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 20.dp),
+                    )
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
+                        items(filteredApps, key = { it.packageName }) { app ->
+                            val selected = app.packageName in selectedPackages
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clickable { setAppEnabled(app.packageName, !selected) }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                AppIcon(app.packageName, app.displayName, Modifier.size(34.dp))
+                                Spacer(Modifier.width(TaskTunnelTokens.IconTextGap))
+                                Text(
+                                    app.displayName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Checkbox(
+                                    checked = selected,
+                                    onCheckedChange = { setAppEnabled(app.packageName, it) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = dismiss) { Text("Done") } },
+    )
 }
 
 @Composable
@@ -609,6 +731,7 @@ fun OnboardingScreen(
     progress: OnboardingProgress,
     accessibilityEnabled: Boolean,
     selectedDriftPackages: Set<String>,
+    availableDriftApps: List<KnownDriftApp>,
     setDriftEnabled: (Boolean) -> Unit,
     setDriftAppEnabled: (String, Boolean) -> Unit,
     advance: () -> Unit,
@@ -662,7 +785,12 @@ fun OnboardingScreen(
                 OnboardingStep.HOW_IT_WORKS -> HowItWorksOnboarding()
                 OnboardingStep.DISCLOSURE -> DisclosureContent()
                 OnboardingStep.VERIFY -> VerifyOnboarding(accessibilityEnabled, openAccessibilitySettings)
-                OnboardingStep.CONFIGURE -> ConfigureOnboarding(selectedDriftPackages, setDriftEnabled, setDriftAppEnabled)
+                OnboardingStep.CONFIGURE -> ConfigureOnboarding(
+                    selected = selectedDriftPackages,
+                    availableApps = availableDriftApps,
+                    setEnabled = setDriftEnabled,
+                    setApp = setDriftAppEnabled,
+                )
             }
             Spacer(Modifier.height(24.dp))
         }
@@ -737,7 +865,12 @@ private fun VerifyOnboarding(accessibilityEnabled: Boolean, openSettings: () -> 
 }
 
 @Composable
-private fun ConfigureOnboarding(selected: Set<String>, setEnabled: (Boolean) -> Unit, setApp: (String, Boolean) -> Unit) {
+private fun ConfigureOnboarding(
+    selected: Set<String>,
+    availableApps: List<KnownDriftApp>,
+    setEnabled: (Boolean) -> Unit,
+    setApp: (String, Boolean) -> Unit,
+) {
     Text("Your protection setup", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text("Task Tunnel protects these intentions.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 10.dp, bottom = 24.dp))
     SettingsRow("Instagram", "Reply to messages\nBrowse intentionally", leading = { AppIcon("com.instagram.android", "Instagram", Modifier.size(38.dp)) })
@@ -747,7 +880,7 @@ private fun ConfigureOnboarding(selected: Set<String>, setEnabled: (Boolean) -> 
     SettingsRow("TikTok", "Search / watch something specific\nCheck Inbox\nBrowse intentionally", leading = { AppIcon("com.zhiliaoapp.musically", "TikTok", Modifier.size(38.dp)) })
     Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
     SectionHeader("Optional Drift Detection", Modifier.padding(bottom = 6.dp))
-    DriftConfigurationSection(selected, setEnabled, setApp)
+    DriftConfigurationSection(selected, availableApps, setEnabled, setApp)
 }
 
 @Composable
@@ -759,9 +892,9 @@ fun DisclosureContent() {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 10.dp, bottom = 18.dp),
     )
-    DisclosureItem("What it can see", "Enough of the visible interface in supported apps to identify supported surfaces such as Messages, Reels, Explore, Search, normal videos, Shorts, For You, Friends, Inbox, and Profile.")
-    DisclosureItem("Why", "To tell when you move outside the purpose you declared and offer a choice.")
-    DisclosureItem("What is stored", "Your chosen purposes, meaningful app transitions, Task Tunnel prompts, and the choices you make.")
+    DisclosureItem("What it can see", "In supported apps, enough of the visible interface to identify surfaces such as Messages, Reels, Explore, Search, normal videos, Shorts, For You, Friends, Inbox, and Profile. For apps used only in Drift Detection, Task Tunnel uses the foreground app identity rather than reading that app's screen content.")
+    DisclosureItem("Why", "To tell when you move outside the purpose you declared and to notice rapid switching between the apps you selected for Drift Detection.")
+    DisclosureItem("What is stored", "Your chosen purposes, selected Drift apps, meaningful app transitions, Task Tunnel prompts, and the choices you make.")
     DisclosureItem("What is not stored", "No screenshots, private message contents, accessibility text history, usernames in Attention history, raw accessibility trees, or raw fingerprints.")
     DisclosureItem("Where processing happens", "Everything is processed on this device. No account or cloud connection is required.")
 }

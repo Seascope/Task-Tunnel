@@ -103,7 +103,9 @@ object ProtectionSnapshotFactory {
             lastServiceActivityMillis = runtime.lastHeartbeatMillis,
             installedApps = apps,
             driftEnabled = selectedDriftPackages.isNotEmpty(),
-            driftApps = DriftAppCatalog.apps.filter { it.packageName in selectedDriftPackages }.map { it.displayName },
+            driftApps = selectedDriftPackages
+                .map { DriftAppCatalog.labelFor(context, it) }
+                .sortedWith(String.CASE_INSENSITIVE_ORDER),
             databaseStatus = if (databaseAvailable) "available" else "unavailable",
         )
         return ProtectionSnapshot(health, apps, report)

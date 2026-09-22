@@ -15,13 +15,9 @@ class DriftCoordinator(
     val state: DriftDetectorState
         get() = detector.state
 
-    fun observeForeground(packageName: String?, nowMillis: Long, activeTunnel: Boolean) {
+    fun observeForeground(packageName: String?, nowMillis: Long) {
         if (packageName.isNullOrBlank()) return
         foregroundPackage = packageName
-        if (activeTunnel) {
-            detector.clear()
-            return
-        }
         detector.observeForeground(packageName, nowMillis)
     }
 
@@ -35,10 +31,10 @@ class DriftCoordinator(
 
     fun markCheckInShown(episodeId: String) = detector.markCheckInShown(episodeId)
 
-    fun keepGoing(episodeId: String) = detector.acknowledge(episodeId)
+    fun keepGoing(episodeId: String, nowMillis: Long) = detector.acknowledge(episodeId, nowMillis)
 
-    fun setAnIntention(episodeId: String): SupportedApp? {
-        detector.acknowledge(episodeId)
+    fun setAnIntention(episodeId: String, nowMillis: Long): SupportedApp? {
+        detector.acknowledge(episodeId, nowMillis)
         return SupportedApp.fromPackage(foregroundPackage)
     }
 

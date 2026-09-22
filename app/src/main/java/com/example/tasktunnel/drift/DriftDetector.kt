@@ -63,17 +63,23 @@ class DriftDetector(
         if (packageName.isNullOrBlank() || packageName in ignoredPackages) return
         resetAfterQuietPeriod(nowMillis)
 
+        val currentEpisode = state.episode
+
         val retained = state.transitions.filter {
             nowMillis - it.observedAtMillis <= policy.rollingWindowMillis
         }
         if (packageName == state.lastObservedPackage) {
-            state = state.copy(transitions = retained)
+            state = state.copy(
+                transitions = retained,
+                episode = currentEpisode,
+            )
             return
         }
 
         if (packageName !in selectedPackages) {
             state = state.copy(
                 transitions = retained,
+                episode = currentEpisode,
                 lastObservedPackage = packageName,
             )
             return
@@ -81,7 +87,7 @@ class DriftDetector(
 
         val transitions = (retained + DriftTransition(packageName, nowMillis))
             .takeLast(policy.maxTransitions)
-        val existingEpisode = state.episode
+        val existingEpisode = currentEpisode
         val episode = if (existingEpisode != null) {
             existingEpisode.copy(
                 involvedPackages = (existingEpisode.involvedPackages + packageName).distinct(),
@@ -110,9 +116,14 @@ class DriftDetector(
         state = state.copy(episode = episode.copy(checkInShown = true))
     }
 
-    fun acknowledge(episodeId: String) {
-        val episode = state.episode?.takeIf { it.id == episodeId } ?: return
-        state = state.copy(episode = episode.copy(checkInShown = true, acknowledged = true))
+    fun acknowledge(episodeId: String, nowMillis: Long) {
+        if (state.episode?.id != episodeId) return
+        val baselinePackage = state.lastObservedPackage?.takeIf { it in selectedPackages }
+        state = DriftDetectorState(
+            transitions = baselinePackage?.let { listOf(DriftTransition(it, nowMillis)) }.orEmpty(),
+            episode = null,
+            lastObservedPackage = state.lastObservedPackage,
+        )
     }
 
     fun replaceSelectedPackages(packages: Set<String>) {

@@ -37,6 +37,28 @@ class DriftDetectorTest {
     }
 
     @Test
+    fun redditInstagramYouTubeSequenceTriggersInObservedOrder() {
+        val detector = detector(selected = SELECTED_WITH_TIKTOK)
+
+        detector.observeForeground(REDDIT, 0)
+        detector.observeForeground(INSTAGRAM, 10)
+        detector.observeForeground(YOUTUBE, 20)
+
+        assertEquals(listOf(REDDIT, INSTAGRAM, YOUTUBE), detector.pendingCheckIn?.involvedPackages)
+    }
+
+    @Test
+    fun instagramYouTubeTikTokSequenceTriggersInObservedOrder() {
+        val detector = detector(selected = SELECTED_WITH_TIKTOK)
+
+        detector.observeForeground(INSTAGRAM, 0)
+        detector.observeForeground(YOUTUBE, 10)
+        detector.observeForeground(TIKTOK, 20)
+
+        assertEquals(listOf(INSTAGRAM, YOUTUBE, TIKTOK), detector.pendingCheckIn?.involvedPackages)
+    }
+
+    @Test
     fun threeDistinctAppsOutsideWindowDoNotTrigger() {
         val detector = detector(window = 60, quiet = 1_000)
 
@@ -86,24 +108,24 @@ class DriftDetectorTest {
     }
 
     @Test
-    fun keepGoingAcknowledgesEpisodeAndPreventsImmediateRepeat() {
-        val detector = detector()
+    fun resolvingEpisodeStartsFreshSequenceFromCurrentApp() {
+        val detector = detector(selected = SELECTED_WITH_TIKTOK)
         trigger(detector)
         val episode = requireNotNull(detector.pendingCheckIn)
 
-        detector.acknowledge(episode.id)
-        detector.observeForeground(REDDIT, 30)
+        detector.acknowledge(episode.id, 20)
 
         assertNull(detector.pendingCheckIn)
-        assertTrue(detector.state.episode?.acknowledged == true)
+        assertNull(detector.state.episode)
+        assertEquals(listOf(YOUTUBE), detector.state.transitions.map { it.packageName })
     }
 
     @Test
-    fun quietPeriodResetsEpisodeAndLaterSequenceCanTrigger() {
+    fun quietPeriodStillResetsFreshSequenceAndLaterSequenceCanTrigger() {
         var id = 0
         val detector = detector(quiet = 100, idFactory = { "episode-${++id}" })
         trigger(detector)
-        detector.acknowledge("episode-1")
+        detector.acknowledge("episode-1", 20)
 
         detector.observeForeground(INSTAGRAM, 120)
         assertNull(detector.state.episode)
@@ -125,6 +147,31 @@ class DriftDetectorTest {
         assertFalse(REDDIT in detector.selectedPackages)
     }
 
+    @Test
+    fun resolvedEpisodeCanRetriggerFromFreshThreeAppSequenceWithoutCooldown() {
+        var id = 0
+        val detector = detector(
+            window = 200,
+            quiet = 500,
+            idFactory = { "episode-${++id}" },
+            selected = SELECTED_WITH_TIKTOK,
+        )
+
+        detector.observeForeground(INSTAGRAM, 0)
+        detector.observeForeground(REDDIT, 10)
+        detector.observeForeground(YOUTUBE, 20)
+        detector.acknowledge("episode-1", 20)
+
+        // The resolved YouTube episode becomes the baseline. One new app is not enough to
+        // re-show Drift, but a second distinct app completes a fresh three-app sequence.
+        detector.observeForeground(INSTAGRAM, 30)
+        assertNull(detector.pendingCheckIn)
+        detector.observeForeground(TIKTOK, 40)
+
+        assertEquals("episode-2", detector.pendingCheckIn?.id)
+        assertEquals(listOf(YOUTUBE, INSTAGRAM, TIKTOK), detector.pendingCheckIn?.involvedPackages)
+    }
+
     private fun trigger(detector: DriftDetector) {
         detector.observeForeground(INSTAGRAM, 0)
         detector.observeForeground(REDDIT, 10)
@@ -135,8 +182,9 @@ class DriftDetectorTest {
         window: Long = 60,
         quiet: Long = 60,
         idFactory: () -> String = { "episode-1" },
+        selected: Set<String> = SELECTED,
     ) = DriftDetector(
-        selectedPackages = SELECTED,
+        selectedPackages = selected,
         policy = DriftPolicy(
             distinctAppThreshold = 3,
             rollingWindowMillis = window,
@@ -149,7 +197,9 @@ class DriftDetectorTest {
         private const val INSTAGRAM = "com.instagram.android"
         private const val YOUTUBE = "com.google.android.youtube"
         private const val REDDIT = "com.reddit.frontpage"
+        private const val TIKTOK = "com.zhiliaoapp.musically"
         private const val CHROME = "com.android.chrome"
         private val SELECTED = setOf(INSTAGRAM, YOUTUBE, REDDIT)
+        private val SELECTED_WITH_TIKTOK = setOf(INSTAGRAM, YOUTUBE, TIKTOK, REDDIT)
     }
 }

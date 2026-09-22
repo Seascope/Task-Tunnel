@@ -4,6 +4,7 @@ import android.graphics.drawable.BitmapDrawable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,6 +48,7 @@ import com.example.tasktunnel.attention.AttentionSubtype
 import com.example.tasktunnel.attention.episodeSubtitle
 import com.example.tasktunnel.attention.episodeTitle
 import com.example.tasktunnel.attention.surfaceLabel
+import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.protection.ProtectionHealth
 import com.example.tasktunnel.protection.ProtectionLevel
 import com.example.tasktunnel.ui.theme.HealthyGreen
@@ -198,11 +201,13 @@ fun EpisodeRow(episode: AttentionEpisode, onClick: () -> Unit, modifier: Modifie
 
 @Composable
 fun DriftEpisodeRow(episode: AttentionEpisode, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val appPath = episode.involvedPackages
+        .joinToString(" → ") { packageName -> DriftAppCatalog.labelFor(context, packageName) }
+        .ifBlank { episodeSubtitle(episode) }
     Column(modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = TaskTunnelTokens.RowVerticalPadding)) {
         Row(verticalAlignment = Alignment.Top) {
-            Box(Modifier.size(38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                TaskTunnelIcon(TaskTunnelIconKind.ATTENTION, Modifier.size(20.dp), MaterialTheme.colorScheme.primary)
-            }
+            DriftEpisodeIconStack(episode.involvedPackages, Modifier.size(38.dp))
             Spacer(Modifier.width(TaskTunnelTokens.IconTextGap))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -212,11 +217,46 @@ fun DriftEpisodeRow(episode: AttentionEpisode, onClick: () -> Unit, modifier: Mo
                         Text(formatDuration(episode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                Text(episodeSubtitle(episode), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+                Text(appPath, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
                 episodeOutcome(episode)?.let { outcome ->
                     Text(outcome, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DriftEpisodeIconStack(packages: List<String>, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val displayedPackages = packages.distinct().take(3)
+    if (displayedPackages.isEmpty()) {
+        Box(modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+            TaskTunnelIcon(TaskTunnelIconKind.ATTENTION, Modifier.size(20.dp), MaterialTheme.colorScheme.primary)
+        }
+        return
+    }
+
+    val iconSize = 18.dp
+    val iconShape = RoundedCornerShape(7.dp)
+    val surfaceBorder = MaterialTheme.colorScheme.surface
+    val offsets = when (displayedPackages.size) {
+        1 -> listOf(10.dp to 10.dp)
+        2 -> listOf(4.dp to 10.dp, 18.dp to 10.dp)
+        else -> listOf(1.dp to 13.dp, 10.dp to 2.dp, 19.dp to 13.dp)
+    }
+
+    Box(modifier) {
+        displayedPackages.forEachIndexed { index, packageName ->
+            val (x, y) = offsets[index]
+            AppIcon(
+                packageName = packageName,
+                displayName = DriftAppCatalog.labelFor(context, packageName),
+                modifier = Modifier
+                    .size(iconSize)
+                    .offset(x = x, y = y)
+                    .border(1.dp, surfaceBorder, iconShape)
+            )
         }
     }
 }
@@ -271,14 +311,6 @@ fun ErrorNotice(title: String, body: String, modifier: Modifier = Modifier) {
         Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
-
-val AttentionApp.packageName: String
-    get() = when (this) {
-        AttentionApp.INSTAGRAM -> "com.instagram.android"
-        AttentionApp.YOUTUBE -> "com.google.android.youtube"
-        AttentionApp.TIKTOK -> "com.zhiliaoapp.musically"
-        AttentionApp.REDDIT -> "com.reddit.frontpage"
-    }
 
 fun formatTime(timeMillis: Long): String = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(timeMillis))
 

@@ -181,7 +181,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         driftCoordinator.observeForeground(
             packageName = packageName,
             nowMillis = nowMillis,
-            activeTunnel = tunnelCoordinator.state.activeSession != null,
         )
         updateTunnelUi()
         val activeSession = tunnelCoordinator.state.activeSession
@@ -394,7 +393,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 val packages = listOf("com.instagram.android", "com.reddit.frontpage", "com.google.android.youtube")
                 driftCheckInView(
                     DriftEpisode("visual-qa", now - 45_000L, packages, now),
-                    packages.mapNotNull(DriftAppCatalog::labelFor),
+                    packages.map { packageName -> DriftAppCatalog.labelFor(this, packageName) },
                 )
             }
             VisualQaOverlay.SESSION_EXPIRY -> sessionExpiredView(
@@ -893,8 +892,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun updateTunnelUi() {
         tunnelCoordinator.setCheckInsEnabled(IntentionalCheckInPreferences.load(applicationContext))
         syncTunnelState()
-        refreshTunnelOverlay()
+        // Drift is the entry-level intervention for rapid app hopping. It should beat the
+        // ordinary Purpose Gate, but never an active Tunnel interaction. Refresh it first so a
+        // qualifying sequence can claim the overlay before the current app's Purpose Gate is
+        // rendered.
         refreshDriftOverlay()
+        syncTunnelState()
+        refreshTunnelOverlay()
         scheduleTunnelDeadline()
         tunnelNotificationController.sync(tunnelCoordinator.state)
         scheduleNotificationProgressRefresh()
@@ -914,6 +918,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun refreshTunnelOverlay() {
         val prompt = tunnelCoordinator.state.prompt
+        // A visible Drift check-in owns the entry overlay slot. The only Tunnel prompt it can
+        // coexist with conceptually is a Purpose Gate, and refreshDriftOverlay() dismisses that
+        // gate before showing Drift. Keep this guard as a fail-safe against overlay stacking.
+        if (driftOverlayView != null && prompt is TunnelPrompt.PurposeGate && tunnelCoordinator.state.activeSession == null) {
+            removeTunnelOverlay()
+            return
+        }
         if (prompt != null) removeDriftOverlay()
         if (prompt == shownTunnelPrompt && tunnelOverlayView != null) return
         removeTunnelOverlay()
@@ -974,21 +985,37 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun refreshDriftOverlay() {
         val tunnelState = tunnelCoordinator.state
         val foregroundPackage = driftCoordinator.foregroundPackage
-        if (
-            tunnelState.prompt != null ||
-            tunnelState.activeSession != null ||
-            !driftCoordinator.isSelected(foregroundPackage)
-        ) {
+        val promptBlocksDrift = tunnelState.prompt != null && tunnelState.prompt !is TunnelPrompt.PurposeGate
+        val activeTunnelOwnsForeground = tunnelState.activeSession?.app?.packageName == foregroundPackage
+        if (activeTunnelOwnsForeground || promptBlocksDrift || !driftCoordinator.isSelected(foregroundPackage)) {
             removeDriftOverlay()
             return
         }
-        if (driftOverlayView != null) return
+
+        // While Drift is already on screen, moving to another enabled distraction app can make
+        // TunnelCoordinator create that app's normal Purpose Gate. Drift still owns the decision
+        // point, so discard the hidden gate rather than letting it replace the check-in.
+        if (driftOverlayView != null) {
+            if (tunnelCoordinator.state.prompt is TunnelPrompt.PurposeGate) {
+                tunnelCoordinator.dismissPurposeGate()
+            }
+            removeTunnelOverlay()
+            return
+        }
+
         val episode = driftCoordinator.checkInCandidate(higherPriorityPromptVisible = false) ?: return
-        val labels = episode.involvedPackages.mapNotNull(DriftAppCatalog::labelFor)
-        if (labels.size < 2) return
+        val labels = episode.involvedPackages.map { DriftAppCatalog.labelFor(this, it) }
+
+        // A newly entered supported app normally creates its Purpose Gate immediately. A valid
+        // Drift episode is more useful at this point, so consume that ordinary gate. "Set an
+        // intention" below can explicitly request a fresh Purpose Gate if the user chooses it.
+        if (tunnelCoordinator.state.prompt is TunnelPrompt.PurposeGate) {
+            tunnelCoordinator.dismissPurposeGate()
+        }
 
         handler.removeCallbacks(showOverlay)
         removeTestOverlay()
+        removeTunnelOverlay()
         AccessibilityRuntime.update { it.copy(overlayPending = false) }
         val layout = driftCheckInView(episode, labels)
         val params = WindowManager.LayoutParams(
@@ -1017,31 +1044,47 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         addView(overlayAppSequence(episode.involvedPackages, labels))
         addView(overlayText("Looking for something?", heading = true))
         addView(overlayText("You moved between ${humanReadableList(labels)} in under a minute.", secondary = true))
-        addView(overlayPrimaryButton("Set an intention") {
-            attentionRecorder.driftDecision(
-                episode = episode,
-                subtype = AttentionSubtype.SET_INTENTION,
-                decision = AttentionDecision.SET_INTENTION,
-                foregroundPackage = driftCoordinator.foregroundPackage,
-                nowMillis = System.currentTimeMillis(),
-            )
-            val app = driftCoordinator.setAnIntention(episode.id)
-            removeDriftOverlay()
-            if (app != null) tunnelCoordinator.requestPurposeGate(app)
-            updateTunnelUi()
-        })
-        addView(overlayTextButton("Keep going") {
-            attentionRecorder.driftDecision(
-                episode = episode,
-                subtype = AttentionSubtype.KEEP_GOING,
-                decision = AttentionDecision.KEEP_GOING,
-                foregroundPackage = driftCoordinator.foregroundPackage,
-                nowMillis = System.currentTimeMillis(),
-            )
-            driftCoordinator.keepGoing(episode.id)
-            removeDriftOverlay()
-            updateTunnelUi()
-        })
+        val foregroundApp = SupportedApp.fromPackage(driftCoordinator.foregroundPackage)
+        if (foregroundApp != null) {
+            addView(overlayPrimaryButton("Set an intention") {
+                val nowMillis = System.currentTimeMillis()
+                attentionRecorder.driftDecision(
+                    episode = episode,
+                    subtype = AttentionSubtype.SET_INTENTION,
+                    decision = AttentionDecision.SET_INTENTION,
+                    foregroundPackage = driftCoordinator.foregroundPackage,
+                    nowMillis = nowMillis,
+                )
+                val app = driftCoordinator.setAnIntention(episode.id, nowMillis)
+                removeDriftOverlay()
+                if (app != null) tunnelCoordinator.requestPurposeGate(app)
+                updateTunnelUi()
+            })
+            addView(overlayTextButton("Keep going") {
+                acknowledgeDriftAndKeepGoing(episode)
+            })
+        } else {
+            // Drift can include apps that do not have Task Tunnel surface detection or Purpose
+            // Gate support. Do not offer a dead-end intention action in those apps; acknowledging
+            // the pattern is the only meaningful choice and starts a fresh Drift sequence here.
+            addView(overlayPrimaryButton("Understood") {
+                acknowledgeDriftAndKeepGoing(episode)
+            })
+        }
+    }
+
+    private fun acknowledgeDriftAndKeepGoing(episode: DriftEpisode) {
+        val nowMillis = System.currentTimeMillis()
+        attentionRecorder.driftDecision(
+            episode = episode,
+            subtype = AttentionSubtype.KEEP_GOING,
+            decision = AttentionDecision.KEEP_GOING,
+            foregroundPackage = driftCoordinator.foregroundPackage,
+            nowMillis = nowMillis,
+        )
+        driftCoordinator.keepGoing(episode.id, nowMillis)
+        removeDriftOverlay()
+        updateTunnelUi()
     }
 
     private fun humanReadableList(labels: List<String>): String = when (labels.size) {
@@ -1498,7 +1541,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             evaluateCurrentSurface = !directedDestination,
         )
         tunnelCoordinator.state.activeSession?.let { attentionRecorder.purposeSelected(it, nowMillis) }
-        driftCoordinator.clear()
         updateTunnelUi()
         if (directedDestination) {
             navigateToTaskDestinationAfterOverlayDismiss(task)

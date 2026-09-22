@@ -139,19 +139,36 @@ private fun AttentionEvent.toEntity() = AttentionEventEntity(
     tunnelId = tunnelId,
     driftEpisodeId = driftEpisodeId,
     decision = decision?.name,
-    relatedApps = relatedApps.takeIf { it.isNotEmpty() }?.joinToString(",") { it.name },
+    // Keep the existing column for schema compatibility, but persist package names so arbitrary
+    // Drift apps survive history. Older rows stored AttentionApp enum names and are decoded below.
+    relatedApps = (relatedPackages.ifEmpty { relatedApps.map(AttentionApp::packageName) })
+        .takeIf { it.isNotEmpty() }
+        ?.joinToString(","),
 )
 
-private fun AttentionEventEntity.toDomain() = AttentionEvent(
-    id = id,
-    timestampMillis = timestampMillis,
-    type = AttentionEventType.valueOf(type),
-    subtype = AttentionSubtype.valueOf(subtype),
-    app = app?.let(AttentionApp::valueOf),
-    surface = surface?.let(DetectedSurface::valueOf),
-    task = task?.let(TunnelTask::valueOf),
-    tunnelId = tunnelId,
-    driftEpisodeId = driftEpisodeId,
-    decision = decision?.let(AttentionDecision::valueOf),
-    relatedApps = relatedApps.orEmpty().split(',').filter(String::isNotBlank).map(AttentionApp::valueOf),
-)
+private fun AttentionEventEntity.toDomain(): AttentionEvent {
+    val packages = relatedApps.orEmpty()
+        .split(',')
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .map { token ->
+            // v1/v2 history stored enum names such as INSTAGRAM. New rows store real packages.
+            runCatching { AttentionApp.valueOf(token).packageName }.getOrElse { token }
+        }
+        .distinct()
+
+    return AttentionEvent(
+        id = id,
+        timestampMillis = timestampMillis,
+        type = AttentionEventType.valueOf(type),
+        subtype = AttentionSubtype.valueOf(subtype),
+        app = app?.let(AttentionApp::valueOf),
+        surface = surface?.let(DetectedSurface::valueOf),
+        task = task?.let(TunnelTask::valueOf),
+        tunnelId = tunnelId,
+        driftEpisodeId = driftEpisodeId,
+        decision = decision?.let(AttentionDecision::valueOf),
+        relatedApps = packages.mapNotNull(AttentionApp::fromPackage),
+        relatedPackages = packages,
+    )
+}

@@ -87,6 +87,9 @@ class MainActivity : ComponentActivity() {
                 var disclosureReturn by remember { mutableStateOf(MainDestination.PROTECTION) }
                 var onboarding by remember { mutableStateOf(OnboardingPreferences.load(this@MainActivity)) }
                 var selectedDriftPackages by remember { mutableStateOf(DriftPoolPreferences.load(this@MainActivity)) }
+                val availableDriftApps = remember(lifecycleRefresh) {
+                    DriftAppCatalog.installedLaunchableApps(this@MainActivity)
+                }
                 var intentionalCheckInsEnabled by remember { mutableStateOf(IntentionalCheckInPreferences.load(this@MainActivity)) }
                 var showNotificationOffer by remember { mutableStateOf(false) }
                 LaunchedEffect(onboarding.completed, notificationControlsEnabled) {
@@ -133,7 +136,11 @@ class MainActivity : ComponentActivity() {
                     AccessibilityRuntime.setDriftPool(selectedDriftPackages)
                 }
                 val setDriftEnabled: (Boolean) -> Unit = { enabled ->
-                    selectedDriftPackages = if (enabled) DriftAppCatalog.knownPackages else emptySet()
+                    selectedDriftPackages = if (enabled) {
+                        DriftPoolPreferences.restoreSelection(this@MainActivity)
+                    } else {
+                        emptySet()
+                    }
                     DriftPoolPreferences.save(this@MainActivity, selectedDriftPackages)
                     AccessibilityRuntime.setDriftPool(selectedDriftPackages)
                 }
@@ -160,6 +167,7 @@ class MainActivity : ComponentActivity() {
                         progress = onboarding,
                         accessibilityEnabled = serviceEnabled,
                         selectedDriftPackages = selectedDriftPackages,
+                        availableDriftApps = availableDriftApps,
                         setDriftEnabled = setDriftEnabled,
                         setDriftAppEnabled = setDriftAppEnabled,
                         advance = { saveOnboarding(OnboardingFlow.next(onboarding)) },
@@ -247,6 +255,7 @@ class MainActivity : ComponentActivity() {
                                     ProtectionScreen(
                                         snapshot = snapshot,
                                         selectedDriftPackages = selectedDriftPackages,
+                                        availableDriftApps = availableDriftApps,
                                         intentionalCheckInsEnabled = intentionalCheckInsEnabled,
                                         setIntentionalCheckInsEnabled = {
                                             intentionalCheckInsEnabled = it
