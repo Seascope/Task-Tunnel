@@ -14,21 +14,29 @@
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
+        <ImageView
+            android:id="@+id/notification_target_icon"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_marginEnd="8dp"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter" />
+
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:orientation="vertical"
-            android:paddingEnd="8dp">
+            android:paddingEnd="10dp">
 
             <TextView
                 android:id="@+id/notification_purpose"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
-                android:maxLines="1"
+                android:maxLines="2"
                 android:textColor="@color/notification_text_primary"
-                android:textSize="16sp"
+                android:textSize="15sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -39,44 +47,36 @@
                 android:ellipsize="end"
                 android:maxLines="1"
                 android:textColor="@color/notification_text_secondary"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
         </LinearLayout>
 
-        <ImageView
-            android:id="@+id/notification_target_icon"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:contentDescription="@null"
-            android:scaleType="fitCenter" />
+        <Chronometer
+            android:id="@+id/notification_timer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFeatureSettings="tnum"
+            android:maxLines="1"
+            android:textColor="@color/notification_text_primary"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/notification_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:textColor="@color/notification_text_secondary"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
     </LinearLayout>
-
-    <Chronometer
-        android:id="@+id/notification_timer"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:maxLines="1"
-        android:textColor="@color/notification_text_primary"
-        android:textSize="20sp"
-        android:textStyle="bold" />
-
-    <TextView
-        android:id="@+id/notification_status"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:maxLines="1"
-        android:textColor="@color/notification_text_primary"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        android:visibility="gone" />
 
     <ProgressBar
         android:id="@+id/notification_progress"
         style="?android:attr/progressBarStyleHorizontal"
         android:layout_width="match_parent"
         android:layout_height="4dp"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="9dp"
         android:indeterminate="false"
         android:max="1000"
         android:progressBackgroundTint="@color/notification_progress_track"
@@ -113,11 +113,11 @@
             android:layout_marginEnd="8dp"
             android:layout_weight="1"
             android:background="@drawable/notification_action_background"
+            android:contentDescription="Change purpose"
             android:gravity="center"
             android:maxLines="1"
             android:paddingStart="10dp"
             android:paddingEnd="10dp"
-            android:contentDescription="Change purpose"
             android:text="Purpose"
             android:textColor="@color/notification_text_primary"
             android:textSize="13sp"

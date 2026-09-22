@@ -288,7 +288,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     fun onNotificationChangePurpose(sessionId: String) {
-        dismissNotificationShadeThen(sessionId) {
+        if (tunnelCoordinator.state.activeSession?.id != sessionId) return
+        dismissNotificationShadeThen(sessionId, requireProtectedApp = false) {
             if (tunnelCoordinator.requestPurposeChange(sessionId, System.currentTimeMillis())) {
                 updateTunnelUi()
             }
@@ -297,7 +298,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     fun onNotificationContinue(sessionId: String) {
         if (tunnelCoordinator.state.activeSession?.id != sessionId) return
-        dismissNotificationShadeThen(sessionId) {
+        dismissNotificationShadeThen(sessionId, requireProtectedApp = true) {
             val state = tunnelCoordinator.state
             if (state.activeSession?.id != sessionId) return@dismissNotificationShadeThen
             when (state.prompt) {
@@ -322,12 +323,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Notification buttons are handled by a BroadcastReceiver, so SystemUI can still own the
-     * active accessibility window when the command arrives. Dismiss the shade first, then wait
-     * until the protected app is actually foreground before showing overlays or inspecting its tree.
+     * Notification buttons arrive while SystemUI still owns the active accessibility window.
+     * Always dismiss the shade before touching overlay UI. Actions that inspect or manipulate the
+     * protected app can additionally wait for that app; the Purpose picker must not, because it is
+     * valid to change the tunnel while the user is on Home or in another app.
      */
     private fun dismissNotificationShadeThen(
         sessionId: String,
+        requireProtectedApp: Boolean,
         attemptsRemaining: Int = NOTIFICATION_ACTION_MAX_ATTEMPTS,
         action: () -> Unit,
     ) {
@@ -335,16 +338,19 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
         }
-        fun awaitProtectedApp(remaining: Int) {
+        fun runWhenReady(remaining: Int) {
             if (tunnelCoordinator.state.activeSession?.id != sessionId) return
-            if (activeRootPackage() == session.app.packageName) {
+            if (!requireProtectedApp || activeRootPackage() == session.app.packageName) {
                 action()
                 return
             }
             if (remaining <= 0) return
-            handler.postDelayed({ awaitProtectedApp(remaining - 1) }, NOTIFICATION_ACTION_RETRY_MS)
+            handler.postDelayed({ runWhenReady(remaining - 1) }, NOTIFICATION_ACTION_RETRY_MS)
         }
-        handler.postDelayed({ awaitProtectedApp(attemptsRemaining) }, NOTIFICATION_ACTION_RETRY_MS)
+        handler.postDelayed(
+            { runWhenReady(attemptsRemaining) },
+            if (requireProtectedApp) NOTIFICATION_ACTION_RETRY_MS else NOTIFICATION_ACTION_SETTLE_MS,
+        )
     }
 
     fun onInspectionArmed(armed: Boolean) {
@@ -1519,30 +1525,66 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun navigateToTaskDestinationAfterOverlayDismiss(task: TunnelTask) {
         handler.postDelayed({
-            if (task == TunnelTask.TIKTOK_SEARCH_WATCH) {
-                navigateToTikTokSearch()
+            if (activeRootPackage() != task.app.packageName) {
+                if (!launchSupportedApp(task.app)) {
+                    tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
+                    updateTunnelUi()
+                    return@postDelayed
+                }
+                awaitTaskAppThenNavigate(task, NOTIFICATION_ACTION_MAX_ATTEMPTS)
                 return@postDelayed
             }
-            if (task == TunnelTask.TIKTOK_INBOX) {
-                navigateToTikTokInbox()
-                return@postDelayed
-            }
-            if (task == TunnelTask.INSTAGRAM_SEARCH || task == TunnelTask.INSTAGRAM_POST) {
-                navigateToInstagramDestination(task)
-                return@postDelayed
-            }
-            if (task == TunnelTask.YOUTUBE_SEARCH_WATCH || task == TunnelTask.YOUTUBE_SUBSCRIPTIONS || task == TunnelTask.YOUTUBE_SHORTS) {
-                navigateToYouTubeDestination(task)
-                return@postDelayed
-            }
-            val navigated = navigateToTaskDestination(task)
-            if (!navigated) {
-                // A directed tunnel must never silently accept the surface it started on.
-                tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
-                updateTunnelUi()
-            }
-            handler.postDelayed({ captureCurrentRoot() }, DESTINATION_NAVIGATION_SETTLE_MS)
+            navigateToTaskDestinationNow(task)
         }, OVERLAY_DISMISS_SETTLE_MS)
+    }
+
+    private fun awaitTaskAppThenNavigate(task: TunnelTask, attemptsRemaining: Int) {
+        if (activeRootPackage() == task.app.packageName) {
+            navigateToTaskDestinationNow(task)
+            return
+        }
+        if (attemptsRemaining <= 0) {
+            tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
+            updateTunnelUi()
+            return
+        }
+        handler.postDelayed(
+            { awaitTaskAppThenNavigate(task, attemptsRemaining - 1) },
+            NOTIFICATION_ACTION_RETRY_MS,
+        )
+    }
+
+    private fun launchSupportedApp(app: SupportedApp): Boolean = runCatching {
+        val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName) ?: return@runCatching false
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        startActivity(launchIntent)
+        true
+    }.getOrDefault(false)
+
+    private fun navigateToTaskDestinationNow(task: TunnelTask) {
+        if (task == TunnelTask.TIKTOK_SEARCH_WATCH) {
+            navigateToTikTokSearch()
+            return
+        }
+        if (task == TunnelTask.TIKTOK_INBOX) {
+            navigateToTikTokInbox()
+            return
+        }
+        if (task == TunnelTask.INSTAGRAM_SEARCH || task == TunnelTask.INSTAGRAM_POST) {
+            navigateToInstagramDestination(task)
+            return
+        }
+        if (task == TunnelTask.YOUTUBE_SEARCH_WATCH || task == TunnelTask.YOUTUBE_SUBSCRIPTIONS || task == TunnelTask.YOUTUBE_SHORTS) {
+            navigateToYouTubeDestination(task)
+            return
+        }
+        val navigated = navigateToTaskDestination(task)
+        if (!navigated) {
+            // A directed tunnel must never silently accept the surface it started on.
+            tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
+            updateTunnelUi()
+        }
+        handler.postDelayed({ captureCurrentRoot() }, DESTINATION_NAVIGATION_SETTLE_MS)
     }
 
     private fun navigateToInstagramDestination(task: TunnelTask) {

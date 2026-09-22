@@ -169,6 +169,12 @@ class TunnelNotificationController(private val context: Context) {
             context.packageManager.getApplicationIcon(session.app.packageName).toBitmap(iconSizePx, iconSizePx)
         }.getOrNull()
 
+        val collapsed = buildCollapsedView(
+            state = state,
+            nowMillis = nowMillis,
+            contextLine = contextLine,
+            largeIcon = largeIcon,
+        )
         val expanded = buildExpandedView(
             state = state,
             nowMillis = nowMillis,
@@ -181,6 +187,7 @@ class TunnelNotificationController(private val context: Context) {
             .setContentTitle("${session.app.displayName} · $purpose")
             .setContentText(collapsedStatus)
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+            .setCustomContentView(collapsed)
             .setCustomBigContentView(expanded)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
@@ -198,17 +205,64 @@ class TunnelNotificationController(private val context: Context) {
                     .build(),
             )
 
-        if (!expired && session.expiresAtMillis != null) {
-            builder
-                .setWhen(session.expiresAtMillis!!)
-                .setUsesChronometer(true)
-                .setChronometerCountDown(true)
-                .setShowWhen(true)
-        } else {
-            builder.setShowWhen(false)
-        }
+        // Both custom layouts own their countdown. Keeping the platform timestamp/chronometer
+        // enabled as well can duplicate the timer in the decorated SystemUI header on some OEMs.
+        builder.setShowWhen(false)
 
         return builder.build()
+    }
+
+
+    private fun buildCollapsedView(
+        state: TunnelRuntimeState,
+        nowMillis: Long,
+        contextLine: String,
+        largeIcon: android.graphics.Bitmap?,
+    ): RemoteViews {
+        val session = requireNotNull(state.activeSession)
+        val expired = session.status == TunnelStatus.EXPIRED || state.prompt is TunnelPrompt.SessionExpired
+
+        return RemoteViews(context.packageName, R.layout.notification_tunnel_collapsed).apply {
+            setTextViewText(R.id.notification_compact_purpose, notificationTaskLabel(session.task))
+            val compactContext = "${session.app.displayName} · $contextLine"
+            if (largeIcon != null) {
+                setImageViewBitmap(R.id.notification_compact_target_icon, largeIcon)
+                setViewVisibility(R.id.notification_compact_target_icon, View.VISIBLE)
+                setViewVisibility(R.id.notification_compact_context, View.GONE)
+                setViewVisibility(R.id.notification_compact_context_row, View.VISIBLE)
+                setViewVisibility(R.id.notification_compact_context_with_icon, View.VISIBLE)
+                setTextViewText(R.id.notification_compact_context_with_icon, compactContext)
+            } else {
+                setViewVisibility(R.id.notification_compact_target_icon, View.GONE)
+                setViewVisibility(R.id.notification_compact_context_row, View.GONE)
+                setViewVisibility(R.id.notification_compact_context_with_icon, View.GONE)
+                setViewVisibility(R.id.notification_compact_context, View.VISIBLE)
+                setTextViewText(R.id.notification_compact_context, compactContext)
+            }
+
+            val total = session.intendedDurationMillis
+            val expiresAt = session.expiresAtMillis
+            if (!expired && total != null && total > 0L && expiresAt != null) {
+                val remaining = (expiresAt - nowMillis).coerceIn(0L, total)
+                val chronometerBase = SystemClock.elapsedRealtime() + remaining
+                setViewVisibility(R.id.notification_compact_timer, View.VISIBLE)
+                setViewVisibility(R.id.notification_compact_status, View.GONE)
+                setViewVisibility(R.id.notification_compact_progress, View.VISIBLE)
+                setChronometer(R.id.notification_compact_timer, chronometerBase, "%s", true)
+                setChronometerCountDown(R.id.notification_compact_timer, true)
+                val progress = ((remaining.toDouble() / total.toDouble()) * PROGRESS_MAX).roundToInt()
+                    .coerceIn(0, PROGRESS_MAX)
+                setProgressBar(R.id.notification_compact_progress, PROGRESS_MAX, progress, false)
+            } else {
+                setViewVisibility(R.id.notification_compact_timer, View.GONE)
+                setViewVisibility(R.id.notification_compact_progress, View.GONE)
+                setViewVisibility(R.id.notification_compact_status, View.VISIBLE)
+                setTextViewText(
+                    R.id.notification_compact_status,
+                    if (expired) "Done" else "No limit",
+                )
+            }
+        }
     }
 
     private fun buildExpandedView(
@@ -241,7 +295,7 @@ class TunnelNotificationController(private val context: Context) {
                 setViewVisibility(R.id.notification_timer, View.VISIBLE)
                 setViewVisibility(R.id.notification_status, View.GONE)
                 setViewVisibility(R.id.notification_progress, View.VISIBLE)
-                setChronometer(R.id.notification_timer, chronometerBase, "Tunnel %s", true)
+                setChronometer(R.id.notification_timer, chronometerBase, "%s", true)
                 setChronometerCountDown(R.id.notification_timer, true)
                 val progress = ((remaining.toDouble() / total.toDouble()) * PROGRESS_MAX).roundToInt()
                     .coerceIn(0, PROGRESS_MAX)
@@ -252,7 +306,7 @@ class TunnelNotificationController(private val context: Context) {
                 setViewVisibility(R.id.notification_status, View.VISIBLE)
                 setTextViewText(
                     R.id.notification_status,
-                    if (expired) "Time complete" else "No time limit",
+                    if (expired) "Time complete" else "No limit",
                 )
             }
 
@@ -311,7 +365,7 @@ class TunnelNotificationController(private val context: Context) {
         const val ACTION_END = "com.example.tasktunnel.notification.END"
         const val ACTION_DISMISSED = "com.example.tasktunnel.notification.DISMISSED"
         const val EXTRA_SESSION_ID = "session_id"
-        const val PROGRESS_REFRESH_MILLIS = 30_000L
+        const val PROGRESS_REFRESH_MILLIS = 2_000L
         private const val PROGRESS_MAX = 1000
         private const val APP_ICON_DP = 48
         private const val NOTIFICATION_ID = 4107
