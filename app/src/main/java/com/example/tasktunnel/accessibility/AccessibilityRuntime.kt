@@ -8,6 +8,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+enum class UiChromeRole {
+    YOUTUBE_HOME,
+    YOUTUBE_SHORTS,
+    YOUTUBE_SUBSCRIPTIONS,
+    YOUTUBE_YOU,
+}
+
 data class SanitizedNode(
     val depth: Int,
     val className: String?,
@@ -20,6 +27,7 @@ data class SanitizedNode(
     val visibleToUser: Boolean,
     val selected: Boolean = false,
     val parentIndex: Int? = null,
+    val chromeRole: UiChromeRole? = null,
 )
 
 data class TreeSnapshot(

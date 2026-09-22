@@ -85,11 +85,26 @@ class InstagramSurfaceDetectorTest {
         )
     }
 
-    @Test fun profileWithStaleClipIdsIsOtherNotReels() {
+    @Test fun profileWithStaleClipIdsIsProfileNotReels() {
         assertDetection(
-            InstagramSurface.INSTAGRAM_OTHER, 0.60,
+            InstagramSurface.INSTAGRAM_PROFILE, 0.80,
             activeTab("profile_tab"), node("clips_media_component"), node("clips_video_container"),
             node("clips_viewer_view_pager"), node("clips_single_media_component"),
+        )
+    }
+
+
+    @Test fun selectedCreationTabIsCreate() {
+        assertDetection(
+            InstagramSurface.INSTAGRAM_CREATE, 0.80,
+            activeTab("creation_tab"),
+        )
+    }
+
+    @Test fun visibleGalleryPickerIsCreateEvenWithoutSelectedCreationTab() {
+        assertDetection(
+            InstagramSurface.INSTAGRAM_CREATE, 0.90,
+            node("gallery_picker_grid_item_container", visible = true),
         )
     }
 

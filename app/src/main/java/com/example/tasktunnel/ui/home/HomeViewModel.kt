@@ -79,13 +79,19 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             HomeSurfaceKind.REELS to durationOf(DetectedSurface.INSTAGRAM_REELS),
             HomeSurfaceKind.MESSAGES to durationOf(DetectedSurface.INSTAGRAM_MESSAGES),
             HomeSurfaceKind.EXPLORE to durationOf(DetectedSurface.INSTAGRAM_EXPLORE),
-            HomeSurfaceKind.OTHER to (durationOf(DetectedSurface.INSTAGRAM_HOME) + durationOf(DetectedSurface.INSTAGRAM_OTHER)),
+            HomeSurfaceKind.HOME to durationOf(DetectedSurface.INSTAGRAM_HOME),
+            HomeSurfaceKind.PROFILE to durationOf(DetectedSurface.INSTAGRAM_PROFILE),
+            HomeSurfaceKind.CREATE to durationOf(DetectedSurface.INSTAGRAM_CREATE),
+            HomeSurfaceKind.OTHER to durationOf(DetectedSurface.INSTAGRAM_OTHER),
             HomeSurfaceKind.UNCLASSIFIED to unclassifiedDurationMillis,
         )
         AttentionApp.YOUTUBE -> listOf(
             HomeSurfaceKind.VIDEO to durationOf(DetectedSurface.YOUTUBE_VIDEO),
             HomeSurfaceKind.SHORTS to durationOf(DetectedSurface.YOUTUBE_SHORTS),
             HomeSurfaceKind.SEARCH to durationOf(DetectedSurface.YOUTUBE_SEARCH),
+            HomeSurfaceKind.HOME to durationOf(DetectedSurface.YOUTUBE_HOME),
+            HomeSurfaceKind.SUBSCRIPTIONS to durationOf(DetectedSurface.YOUTUBE_SUBSCRIPTIONS),
+            HomeSurfaceKind.YOU to durationOf(DetectedSurface.YOUTUBE_YOU),
             HomeSurfaceKind.OTHER to durationOf(DetectedSurface.YOUTUBE_OTHER),
             HomeSurfaceKind.UNCLASSIFIED to unclassifiedDurationMillis,
         )

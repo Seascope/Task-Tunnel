@@ -1,6 +1,7 @@
 package com.example.tasktunnel.detector
 
 import com.example.tasktunnel.accessibility.SanitizedNode
+import com.example.tasktunnel.accessibility.UiChromeRole
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -71,6 +72,40 @@ class YouTubeSurfaceDetectorTest {
         node("com.google.android.youtube:id/not_reel_player_page_container"),
     )
 
+
+    @Test fun selectedHomeChromeRoleIsHome() = assertDetection(
+        YouTubeSurface.YOUTUBE_HOME,
+        0.85,
+        node(chromeRole = UiChromeRole.YOUTUBE_HOME, selected = true),
+    )
+
+    @Test fun selectedSubscriptionsChromeRoleIsSubscriptions() = assertDetection(
+        YouTubeSurface.YOUTUBE_SUBSCRIPTIONS,
+        0.85,
+        node(chromeRole = UiChromeRole.YOUTUBE_SUBSCRIPTIONS, selected = true),
+    )
+
+    @Test fun selectedYouChromeRoleIsYou() = assertDetection(
+        YouTubeSurface.YOUTUBE_YOU,
+        0.85,
+        node(chromeRole = UiChromeRole.YOUTUBE_YOU, selected = true),
+    )
+
+    @Test fun videoEvidenceWinsOverSelectedHomeChromeRole() = assertDetection(
+        YouTubeSurface.YOUTUBE_VIDEO,
+        0.8,
+        node("watch_player"),
+        node(className = "android.widget.SeekBar", visibleToUser = true),
+        node(chromeRole = UiChromeRole.YOUTUBE_HOME, selected = true),
+    )
+
+    @Test fun conflictingSelectedChromeRolesFailOpen() = assertDetection(
+        YouTubeSurface.UNKNOWN,
+        0.0,
+        node(chromeRole = UiChromeRole.YOUTUBE_HOME, selected = true),
+        node(chromeRole = UiChromeRole.YOUTUBE_SUBSCRIPTIONS, selected = true),
+    )
+
     @Test fun nonYouTubePackageFailsOpen() {
         val result = YouTubeSurfaceDetector.detect(
             "com.instagram.android",
@@ -91,8 +126,11 @@ class YouTubeSurfaceDetectorTest {
         className: String = "android.view.View",
         editable: Boolean = false,
         visibleToUser: Boolean = true,
+        selected: Boolean = false,
+        chromeRole: UiChromeRole? = null,
     ) = SanitizedNode(
         depth = 0, className = className, resourceId = id, childCount = 0,
         clickable = false, scrollable = false, editable = editable, enabled = true, visibleToUser = visibleToUser,
+        selected = selected, chromeRole = chromeRole,
     )
 }

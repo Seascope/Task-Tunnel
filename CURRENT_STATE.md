@@ -1,5 +1,28 @@
 # Current State
 
+## Active Tunnel notification controls — 2026-09-22
+
+Status: stabilized implementation in the working tree; physical notification validation required.
+
+- An active Task Tunnel posts a silent low-importance notification only while a session exists. Timed sessions use Android's countdown chronometer; open-ended sessions show **No time limit**. Lock-screen public content is reduced to **Task Tunnel active**.
+- Normal and temporary-detour/intervention actions are **Change purpose** and **End**. Expired/open-ended check-in states expose **Continue**, **Change purpose**, and **End**.
+- Notification actions no longer launch a trampoline Activity or a second control overlay. On Android 12+ the AccessibilityService dismisses the notification shade with `GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE`, waits until the protected app is actually foreground, and only then shows/changing tunnel UI. This avoids SystemUI/foreground lifecycle races.
+- **Change purpose** preserves the original tunnel while the chooser is open and inherits the actual remaining timer when a purpose is selected. Re-selecting the current purpose creates a fresh session with the same remaining time, clearing any temporary detour allowance and effectively recommitting to that purpose. **Keep current purpose** cancels the replacement safely.
+- Android 13+ notification permission is optional. Settings includes **Tunnel notification controls** as a fallback route to Android notification settings. Core Task Tunnel behavior remains functional if notification permission is denied.
+- The notification is rendered directly from `TunnelRuntimeState`; no second foreground service or notification-owned state machine exists. Rendering is deduplicated so routine accessibility events do not constantly repost an unchanged notification.
+
+
+## Purpose expansion and directed routing — 2026-09-22
+
+Status: implementation complete in the working tree; physical validation required on the installed Instagram and YouTube versions.
+
+- Instagram Purpose Gate now offers **Reply to messages**, **Search / look something up**, **Post something**, and **Browse intentionally**. Search routes toward Explore/Search; Post routes toward Instagram Create; nested screens use a bounded Back-to-main-shell fallback when the target tab is not exposed.
+- Instagram Profile and Create are now separate semantic surfaces instead of being folded into Other. Search and Messages are intentionally compatible purposes: a Messages tunnel may move into Explore/Search, and a Search tunnel may move into DMs, while Home/Reels remain out of tunnel. Search still allows Profile/content-detail lookup paths; Post allows the Create/creation-detail path while blocking browsing surfaces.
+- YouTube Purpose Gate now offers **Search / watch something specific**, **Check subscriptions**, **Watch Shorts intentionally**, and **Browse intentionally**. Directed tab routing clicks exact whitelisted YouTube chrome and may unwind only detector-confirmed nested Search/Video screens; it never blindly presses Back from the top-level YouTube shell.
+- YouTube now distinguishes top-level **Home**, **Subscriptions**, and **You** surfaces in addition to Search, Video, Shorts, and Other. The sanitizer derives only a fixed whitelisted navigation-role enum from exact YouTube chrome labels; raw accessibility text/content descriptions are not stored in snapshots, fingerprints, Attention history, or Room.
+- YouTube Search/Watch now treats Home, Shorts, Subscriptions, You, and generic Other shell/detail surfaces as outside the tunnel, allowing only Search and normal Video. Subscriptions allows only the Subscriptions feed and selected normal videos among confidently classified YouTube surfaces. Intentional Shorts allows Shorts and intervenes on other confidently classified YouTube surfaces. UNKNOWN still fails open.
+- Attention labels, Today surface rows, Protection/Settings intention summaries, and focused detector/policy tests were updated for the new tasks and surfaces.
+
 ## TikTok T2 integration
 
 Status: implementation complete; physical validation remains pending.

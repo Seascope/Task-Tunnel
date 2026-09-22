@@ -1,15 +1,23 @@
 package com.example.tasktunnel
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.content.pm.PackageManager
 import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
@@ -17,6 +25,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.tasktunnel.accessibility.AccessibilityRuntime
 import com.example.tasktunnel.attention.AttentionViewModel
@@ -26,6 +36,7 @@ import com.example.tasktunnel.onboarding.OnboardingFlow
 import com.example.tasktunnel.onboarding.OnboardingPreferences
 import com.example.tasktunnel.onboarding.OnboardingProgress
 import com.example.tasktunnel.onboarding.OnboardingStep
+import com.example.tasktunnel.notification.TunnelNotificationPreferences
 import com.example.tasktunnel.protection.DeveloperDiagnosticsGate
 import com.example.tasktunnel.protection.ProtectionSnapshotFactory
 import com.example.tasktunnel.ui.AccessibilityDisclosureScreen
@@ -49,13 +60,21 @@ import com.example.tasktunnel.tunnel.IntentionalCheckInPreferences
 class MainActivity : ComponentActivity() {
     private var serviceEnabled by mutableStateOf(false)
     private var lifecycleRefresh by mutableIntStateOf(0)
+    private var notificationControlsEnabled by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         refreshAccessibilityState()
+        refreshNotificationState()
         setContent {
             TaskTunnelTheme {
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) {
+                    refreshNotificationState()
+                    TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
+                }
                 val runtime by AccessibilityRuntime.state.collectAsState()
                 val attentionViewModel: AttentionViewModel = viewModel()
                 val attention by attentionViewModel.uiState.collectAsState()
@@ -69,6 +88,40 @@ class MainActivity : ComponentActivity() {
                 var onboarding by remember { mutableStateOf(OnboardingPreferences.load(this@MainActivity)) }
                 var selectedDriftPackages by remember { mutableStateOf(DriftPoolPreferences.load(this@MainActivity)) }
                 var intentionalCheckInsEnabled by remember { mutableStateOf(IntentionalCheckInPreferences.load(this@MainActivity)) }
+                var showNotificationOffer by remember { mutableStateOf(false) }
+                LaunchedEffect(onboarding.completed, notificationControlsEnabled) {
+                    if (
+                        onboarding.completed &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        !notificationControlsEnabled &&
+                        !TunnelNotificationPreferences.wasPermissionOffered(this@MainActivity)
+                    ) {
+                        showNotificationOffer = true
+                    }
+                }
+                if (showNotificationOffer) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
+                            showNotificationOffer = false
+                        },
+                        title = { Text("Control active tunnels from notifications") },
+                        text = { Text("Refocus, change purpose, or end a tunnel directly from the notification shade.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
+                                showNotificationOffer = false
+                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }) { Text("Allow notifications") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
+                                showNotificationOffer = false
+                            }) { Text("Not now") }
+                        },
+                    )
+                }
 
                 val saveOnboarding: (OnboardingProgress) -> Unit = { progress ->
                     onboarding = progress
@@ -218,6 +271,21 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 appVersion = BuildConfig.VERSION_NAME,
                                 historyAvailable = attention.historyAvailable,
+                                notificationControlsEnabled = notificationControlsEnabled,
+                                configureNotificationControls = {
+                                    if (
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                        ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+                                        !TunnelNotificationPreferences.wasPermissionOffered(this@MainActivity)
+                                    ) {
+                                        TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    } else {
+                                        startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                                        })
+                                    }
+                                },
                                 clearHistory = attentionViewModel::clearHistory,
                                 openDiagnostics = { destination = MainDestination.DIAGNOSTICS },
                                 openDisclosure = {
@@ -271,7 +339,14 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshAccessibilityState()
+        refreshNotificationState()
         lifecycleRefresh += 1
+    }
+
+    private fun refreshNotificationState() {
+        val permissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        notificationControlsEnabled = permissionGranted && NotificationManagerCompat.from(this).areNotificationsEnabled()
     }
 
     private fun refreshAccessibilityState() {

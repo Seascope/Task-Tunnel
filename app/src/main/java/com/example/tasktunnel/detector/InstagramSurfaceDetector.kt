@@ -8,6 +8,8 @@ enum class InstagramSurface {
     INSTAGRAM_EXPLORE,
     INSTAGRAM_REELS,
     INSTAGRAM_HOME,
+    INSTAGRAM_PROFILE,
+    INSTAGRAM_CREATE,
     INSTAGRAM_OTHER,
     UNKNOWN,
 }
@@ -50,6 +52,15 @@ object InstagramSurfaceDetector {
         val searchSelected = active("search_tab", visible = true, selected = true, clickable = true)
         val clipsSelected = active("clips_tab", visible = true, selected = true, clickable = true)
         val profileSelected = active("profile_tab", visible = true, selected = true, clickable = true)
+        val createSelected = active("creation_tab", visible = true, selected = true, clickable = true)
+        val createFlowSupportIds = setOf(
+            "gallery_picker_grid_item_container",
+            "gallery_picker_container",
+            "media_picker_container",
+            "creation_root",
+            "creation_main_container",
+        )
+        val createFlowSupport = createFlowSupportIds.filter(::present).sorted()
 
         val inboxStrong = directSelected &&
             active("inbox_refreshable_thread_list_recyclerview", visible = true, scrollable = true)
@@ -79,7 +90,8 @@ object InstagramSurfaceDetector {
             if (directSelected) add(InstagramSurface.INSTAGRAM_MESSAGES)
             if (searchSelected) add(InstagramSurface.INSTAGRAM_EXPLORE)
             if (clipsSelected) add(InstagramSurface.INSTAGRAM_REELS)
-            if (profileSelected) add(InstagramSurface.INSTAGRAM_OTHER)
+            if (profileSelected) add(InstagramSurface.INSTAGRAM_PROFILE)
+            if (createSelected) add(InstagramSurface.INSTAGRAM_CREATE)
         }
         val strongSurfaces = buildSet {
             if (messagesStrong) add(InstagramSurface.INSTAGRAM_MESSAGES)
@@ -87,6 +99,13 @@ object InstagramSurfaceDetector {
             if (reelsStrong) add(InstagramSurface.INSTAGRAM_REELS)
             if (homeStrong) add(InstagramSurface.INSTAGRAM_HOME)
         }
+        // The creation picker can be presented over a still-selected main tab. Its dedicated
+        // picker IDs are stronger evidence than stale selected-tab state underneath the modal.
+        if (createFlowSupport.isNotEmpty()) return result(
+            InstagramSurface.INSTAGRAM_CREATE,
+            0.90,
+            createFlowSupport.map { "id:$it" },
+        )
         if (selectedSurfaces.size > 1 || strongSurfaces.size > 1) {
             return unknown(signals(indexed, reelSupport))
         }
@@ -117,7 +136,8 @@ object InstagramSurfaceDetector {
             listOf("active:search_tab", "active:action_bar_search_edit_text", "active:recycler_view"),
         )
         if (homeStrong) return result(InstagramSurface.INSTAGRAM_HOME, 0.85, listOf("active:feed_tab"))
-        if (profileSelected) return result(InstagramSurface.INSTAGRAM_OTHER, 0.60, listOf("active:profile_tab"))
+        if (profileSelected) return result(InstagramSurface.INSTAGRAM_PROFILE, 0.80, listOf("active:profile_tab"))
+        if (createSelected) return result(InstagramSurface.INSTAGRAM_CREATE, 0.80, listOf("active:creation_tab"))
         return unknown(signals(indexed, reelSupport))
     }
 

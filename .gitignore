@@ -1,5 +1,6 @@
 *.iml
 .gradle
+*.patch
 /.gradle-user-home
 /.android-user-home
 /.kotlin

@@ -16,7 +16,7 @@ The service is also used to show the Purpose Gate and intervention over the supp
 
 For Instagram and YouTube, the service can inspect enough of the visible interface to recognize supported surfaces. Android may make interface structure, view identifiers, element classes, state flags, visible text, and content descriptions available to an enabled accessibility service.
 
-Task Tunnel's production detector path uses bounded structure, identifiers, and state flags. It does not need private message contents to classify supported surfaces.
+Task Tunnel's production detector path uses bounded structure, identifiers, and state flags. For YouTube top-level navigation only, it may derive a fixed semantic role such as Home, Shorts, Subscriptions, or You from an exact app-chrome accessibility label; the raw label is not retained. It does not need private message contents, video titles, usernames, or arbitrary accessibility text to classify supported surfaces.
 
 ## What is retained
 

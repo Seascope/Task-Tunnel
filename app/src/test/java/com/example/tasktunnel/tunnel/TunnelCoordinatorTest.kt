@@ -75,6 +75,77 @@ class TunnelCoordinatorTest {
         assertFalse(coordinator.state.prompt is TunnelPrompt.PurposeGate)
     }
 
+
+    @Test
+    fun choosingSamePurposeAgainClearsTemporaryDetourState() {
+        val coordinator = activeInstagramMessagesCoordinator()
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
+        coordinator.allowAnyway(10)
+
+        assertTrue(coordinator.state.overrideScope != null)
+        assertTrue(coordinator.state.detourAllow != null)
+        assertTrue(coordinator.requestPurposeChange("session-1", 20))
+
+        val gate = coordinator.state.prompt as TunnelPrompt.PurposeGate
+        coordinator.startSession(
+            TunnelTask.INSTAGRAM_MESSAGES,
+            nowMillis = 20,
+            intendedDurationMillis = gate.preservedDurationMillis,
+            evaluateCurrentSurface = false,
+        )
+
+        assertEquals(TunnelTask.INSTAGRAM_MESSAGES, coordinator.state.activeSession?.task)
+        assertNull(coordinator.state.overrideScope)
+        assertNull(coordinator.state.detourAllow)
+        assertNull(coordinator.state.prompt)
+    }
+
+    @Test
+    fun purposeChangeKeepsOldSessionUntilUserChoosesAndPreservesRemainingTime() {
+        val coordinator = coordinator().apply {
+            observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+            startSession(TunnelTask.INSTAGRAM_MESSAGES, 1_000, intendedDurationMillis = 10 * 60_000L)
+        }
+        val oldSession = coordinator.state.activeSession
+
+        assertTrue(coordinator.requestPurposeChange("session-1", 4 * 60_000L))
+        val gate = coordinator.state.prompt as TunnelPrompt.PurposeGate
+        assertEquals(oldSession, coordinator.state.activeSession)
+        assertEquals(oldSession?.id, gate.replacingSessionId)
+        assertEquals(361_000L, gate.preservedDurationMillis)
+
+        coordinator.startSession(
+            TunnelTask.INSTAGRAM_SEARCH,
+            nowMillis = 4 * 60_000L,
+            intendedDurationMillis = gate.preservedDurationMillis,
+            evaluateCurrentSurface = false,
+        )
+        assertEquals(TunnelTask.INSTAGRAM_SEARCH, coordinator.state.activeSession?.task)
+        assertEquals(361_000L, coordinator.state.activeSession?.intendedDurationMillis)
+    }
+
+    @Test
+    fun dismissingPurposeChangeKeepsOriginalTunnel() {
+        val coordinator = activeInstagramMessagesCoordinator()
+        val original = coordinator.state.activeSession
+        assertTrue(coordinator.requestPurposeChange("session-1", 10))
+
+        coordinator.dismissPurposeGate()
+
+        assertEquals(original, coordinator.state.activeSession)
+        assertNull(coordinator.state.prompt)
+    }
+
+    @Test
+    fun notificationCanReplaceTimeLimitWithoutChangingPurpose() {
+        val coordinator = activeInstagramMessagesCoordinator()
+        assertTrue(coordinator.updateTimeLimit("session-1", 5_000, 5 * 60_000L))
+
+        assertEquals(TunnelTask.INSTAGRAM_MESSAGES, coordinator.state.activeSession?.task)
+        assertEquals(5_000L, coordinator.state.activeSession?.startedAtMillis)
+        assertEquals(5 * 60_000L, coordinator.state.activeSession?.intendedDurationMillis)
+    }
+
     private fun activeInstagramMessagesCoordinator(): TunnelCoordinator = coordinator().apply {
         observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
         startSession(TunnelTask.INSTAGRAM_MESSAGES, 1)

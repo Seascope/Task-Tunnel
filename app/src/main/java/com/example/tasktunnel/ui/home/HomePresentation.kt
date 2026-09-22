@@ -37,16 +37,20 @@ data class HomeSurfaceUsage(
 )
 
 enum class HomeSurfaceKind(val displayLabel: String) {
+    HOME("Home"),
     FEED("Feed"),
     FRIENDS("Friends"),
     INBOX("Inbox"),
     PROFILE("Profile"),
+    CREATE("Create"),
     REELS("Reels"),
     MESSAGES("Messages"),
     EXPLORE("Explore"),
     VIDEO("Video"),
     SHORTS("Shorts"),
     SEARCH("Search"),
+    SUBSCRIPTIONS("Subscriptions"),
+    YOU("You"),
     OTHER("Other"),
     UNCLASSIFIED("Unclassified"),
 }

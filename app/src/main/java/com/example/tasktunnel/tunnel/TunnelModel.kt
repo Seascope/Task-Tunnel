@@ -17,8 +17,12 @@ enum class SupportedApp(val packageName: String, val displayName: String) {
 
 enum class TunnelTask(val app: SupportedApp) {
     INSTAGRAM_MESSAGES(SupportedApp.INSTAGRAM),
+    INSTAGRAM_SEARCH(SupportedApp.INSTAGRAM),
+    INSTAGRAM_POST(SupportedApp.INSTAGRAM),
     INSTAGRAM_BROWSE(SupportedApp.INSTAGRAM),
     YOUTUBE_SEARCH_WATCH(SupportedApp.YOUTUBE),
+    YOUTUBE_SUBSCRIPTIONS(SupportedApp.YOUTUBE),
+    YOUTUBE_SHORTS(SupportedApp.YOUTUBE),
     YOUTUBE_BROWSE(SupportedApp.YOUTUBE),
     TIKTOK_SEARCH_WATCH(SupportedApp.TIKTOK),
     TIKTOK_INBOX(SupportedApp.TIKTOK),
@@ -45,10 +49,15 @@ enum class DetectedSurface {
     INSTAGRAM_EXPLORE,
     INSTAGRAM_REELS,
     INSTAGRAM_HOME,
+    INSTAGRAM_PROFILE,
+    INSTAGRAM_CREATE,
     INSTAGRAM_OTHER,
     YOUTUBE_SEARCH,
     YOUTUBE_VIDEO,
     YOUTUBE_SHORTS,
+    YOUTUBE_HOME,
+    YOUTUBE_SUBSCRIPTIONS,
+    YOUTUBE_YOU,
     YOUTUBE_OTHER,
     TIKTOK_FEED,
     TIKTOK_FRIENDS,
@@ -68,20 +77,58 @@ object SessionPolicy {
         if (surface == DetectedSurface.UNKNOWN) return PolicyDecision.UNKNOWN_FAIL_OPEN
         return when (task) {
             TunnelTask.INSTAGRAM_MESSAGES -> when (surface) {
-                DetectedSurface.INSTAGRAM_REELS,
-                DetectedSurface.INSTAGRAM_EXPLORE
-                -> PolicyDecision.INTERVENE
-                in instagramSurfaces -> PolicyDecision.ALLOW
+                DetectedSurface.INSTAGRAM_MESSAGES,
+                DetectedSurface.INSTAGRAM_EXPLORE,
+                DetectedSurface.INSTAGRAM_OTHER,
+                -> PolicyDecision.ALLOW
+                in instagramSurfaces -> PolicyDecision.INTERVENE
+                else -> PolicyDecision.UNKNOWN_FAIL_OPEN
+            }
+            TunnelTask.INSTAGRAM_SEARCH -> when (surface) {
+                DetectedSurface.INSTAGRAM_MESSAGES,
+                DetectedSurface.INSTAGRAM_EXPLORE,
+                DetectedSurface.INSTAGRAM_PROFILE,
+                DetectedSurface.INSTAGRAM_OTHER,
+                -> PolicyDecision.ALLOW
+                in instagramSurfaces -> PolicyDecision.INTERVENE
+                else -> PolicyDecision.UNKNOWN_FAIL_OPEN
+            }
+            TunnelTask.INSTAGRAM_POST -> when (surface) {
+                DetectedSurface.INSTAGRAM_CREATE,
+                DetectedSurface.INSTAGRAM_PROFILE,
+                DetectedSurface.INSTAGRAM_OTHER,
+                -> PolicyDecision.ALLOW
+                in instagramSurfaces -> PolicyDecision.INTERVENE
                 else -> PolicyDecision.UNKNOWN_FAIL_OPEN
             }
             TunnelTask.YOUTUBE_SEARCH_WATCH -> when (surface) {
-                DetectedSurface.YOUTUBE_SHORTS -> PolicyDecision.INTERVENE
-                in youtubeSurfaces -> PolicyDecision.ALLOW
+                DetectedSurface.YOUTUBE_SEARCH,
+                DetectedSurface.YOUTUBE_VIDEO,
+                -> PolicyDecision.ALLOW
+                in youtubeSurfaces -> PolicyDecision.INTERVENE
                 else -> PolicyDecision.UNKNOWN_FAIL_OPEN
             }
-            TunnelTask.TIKTOK_SEARCH_WATCH,
-            TunnelTask.TIKTOK_INBOX,
-            -> when (surface) {
+            TunnelTask.YOUTUBE_SUBSCRIPTIONS -> when (surface) {
+                DetectedSurface.YOUTUBE_SUBSCRIPTIONS,
+                DetectedSurface.YOUTUBE_VIDEO,
+                -> PolicyDecision.ALLOW
+                in youtubeSurfaces -> PolicyDecision.INTERVENE
+                else -> PolicyDecision.UNKNOWN_FAIL_OPEN
+            }
+            TunnelTask.YOUTUBE_SHORTS -> when (surface) {
+                DetectedSurface.YOUTUBE_SHORTS -> PolicyDecision.ALLOW
+                in youtubeSurfaces -> PolicyDecision.INTERVENE
+                else -> PolicyDecision.UNKNOWN_FAIL_OPEN
+            }
+            TunnelTask.TIKTOK_SEARCH_WATCH -> when (surface) {
+                DetectedSurface.TIKTOK_FEED,
+                DetectedSurface.TIKTOK_FRIENDS,
+                DetectedSurface.TIKTOK_PROFILE,
+                -> PolicyDecision.INTERVENE
+                in tikTokSurfaces -> PolicyDecision.ALLOW
+                else -> PolicyDecision.UNKNOWN_FAIL_OPEN
+            }
+            TunnelTask.TIKTOK_INBOX -> when (surface) {
                 DetectedSurface.TIKTOK_FEED,
                 DetectedSurface.TIKTOK_FRIENDS,
                 -> PolicyDecision.INTERVENE
@@ -105,12 +152,17 @@ object SessionPolicy {
         DetectedSurface.INSTAGRAM_EXPLORE,
         DetectedSurface.INSTAGRAM_REELS,
         DetectedSurface.INSTAGRAM_HOME,
+        DetectedSurface.INSTAGRAM_PROFILE,
+        DetectedSurface.INSTAGRAM_CREATE,
         DetectedSurface.INSTAGRAM_OTHER,
     )
     private val youtubeSurfaces = setOf(
         DetectedSurface.YOUTUBE_SEARCH,
         DetectedSurface.YOUTUBE_VIDEO,
         DetectedSurface.YOUTUBE_SHORTS,
+        DetectedSurface.YOUTUBE_HOME,
+        DetectedSurface.YOUTUBE_SUBSCRIPTIONS,
+        DetectedSurface.YOUTUBE_YOU,
         DetectedSurface.YOUTUBE_OTHER,
     )
     private val tikTokSurfaces = setOf(
@@ -124,7 +176,11 @@ object SessionPolicy {
 }
 
 sealed interface TunnelPrompt {
-    data class PurposeGate(val app: SupportedApp) : TunnelPrompt
+    data class PurposeGate(
+        val app: SupportedApp,
+        val replacingSessionId: String? = null,
+        val preservedDurationMillis: Long? = null,
+    ) : TunnelPrompt
     data class Intervention(
         val sessionId: String,
         val task: TunnelTask,
@@ -289,7 +345,12 @@ class TunnelCoordinator(
     }
 
     fun dismissPurposeGate() {
-        if (state.prompt is TunnelPrompt.PurposeGate) state = state.copy(prompt = null)
+        val gate = state.prompt as? TunnelPrompt.PurposeGate ?: return
+        state = state.copy(
+            prompt = if (gate.replacingSessionId != null && state.activeSession?.status == TunnelStatus.EXPIRED) {
+                state.activeSession?.let { TunnelPrompt.SessionExpired(it.id, it.app, it.task) }
+            } else null,
+        )
     }
 
     fun requestPurposeGate(app: SupportedApp): Boolean {
@@ -298,9 +359,30 @@ class TunnelCoordinator(
         return true
     }
 
-    fun startSession(task: TunnelTask, nowMillis: Long, intendedDurationMillis: Long? = null) {
+
+    fun requestPurposeChange(sessionId: String, nowMillis: Long): Boolean {
+        val session = state.activeSession?.takeIf { it.id == sessionId } ?: return false
+        val remaining = session.expiresAtMillis?.let { (it - nowMillis).coerceAtLeast(0L) }
+            ?.takeIf { it > 0L }
+        state = state.copy(
+            prompt = TunnelPrompt.PurposeGate(
+                app = session.app,
+                replacingSessionId = session.id,
+                preservedDurationMillis = remaining,
+            ),
+        )
+        return true
+    }
+
+    fun startSession(
+        task: TunnelTask,
+        nowMillis: Long,
+        intendedDurationMillis: Long? = null,
+        evaluateCurrentSurface: Boolean = true,
+    ) {
         val gate = state.prompt as? TunnelPrompt.PurposeGate ?: return
         if (gate.app != task.app) return
+        if (gate.replacingSessionId != null && state.activeSession?.id != gate.replacingSessionId) return
         state = state.copy(
             activeSession = TunnelSession(
                 id = idFactory(),
@@ -330,12 +412,19 @@ class TunnelCoordinator(
         }
         val currentSurface = state.currentSurface
         val observedAt = state.currentSurfaceObservedAtMillis
-        if (currentSurface != null && observedAt != null &&
+        if (evaluateCurrentSurface && currentSurface != null && observedAt != null &&
             state.foregroundPackage == task.app.packageName &&
             nowMillis - observedAt <= CURRENT_SURFACE_FRESHNESS_MILLIS
         ) {
             observeSurface(currentSurface, nowMillis)
         }
+    }
+
+    fun reevaluateCurrentSurface(nowMillis: Long) {
+        val session = state.activeSession?.takeIf { it.status == TunnelStatus.ACTIVE } ?: return
+        val currentSurface = state.currentSurface ?: return
+        if (state.foregroundPackage != session.app.packageName) return
+        observeSurface(currentSurface, nowMillis)
     }
 
     fun observeSurface(surface: DetectedSurface, nowMillis: Long) {
@@ -376,7 +465,7 @@ class TunnelCoordinator(
             )
         }
         advanceTime(nowMillis)
-        if (state.prompt is TunnelPrompt.IntentionCheckIn) return
+        if (state.prompt is TunnelPrompt.PurposeGate || state.prompt is TunnelPrompt.IntentionCheckIn) return
         val activeSession = state.activeSession?.takeIf { it.status == TunnelStatus.ACTIVE } ?: return
         if (activeSession.app.packageName != state.foregroundPackage) return
 
@@ -445,29 +534,33 @@ class TunnelCoordinator(
         )
     }
 
-    fun returnFromIntervention(nowMillis: Long): Boolean {
+    fun returnFromIntervention(nowMillis: Long, addReturnCooldown: Boolean = true): Boolean {
         val intervention = state.prompt as? TunnelPrompt.Intervention ?: return false
         state = state.copy(
             prompt = null,
             detourAllow = null,
-            returnCooldown = ReturnCooldown(
-                intervention.sessionId,
-                intervention.surface,
-                nowMillis + returnCooldownMillis,
-            ),
+            returnCooldown = if (addReturnCooldown) {
+                ReturnCooldown(
+                    intervention.sessionId,
+                    intervention.surface,
+                    nowMillis + returnCooldownMillis,
+                )
+            } else null,
         )
         return true
     }
 
-    fun returnFromCheckIn(nowMillis: Long): Boolean {
+    fun returnFromCheckIn(nowMillis: Long, addReturnCooldown: Boolean = true): Boolean {
         val checkIn = state.prompt as? TunnelPrompt.IntentionCheckIn ?: return false
         state = state.copy(
             prompt = null,
             checkIn = null,
             detourAllow = null,
-            returnCooldown = checkIn.surface?.let {
-                ReturnCooldown(checkIn.sessionId, it, nowMillis + returnCooldownMillis)
-            },
+            returnCooldown = if (addReturnCooldown) {
+                checkIn.surface?.let {
+                    ReturnCooldown(checkIn.sessionId, it, nowMillis + returnCooldownMillis)
+                }
+            } else null,
         )
         return true
     }
@@ -497,6 +590,32 @@ class TunnelCoordinator(
                 ScopedOverride(session.id, checkIn.surface, nextCheck ?: Long.MAX_VALUE)
             } else state.overrideScope,
         )
+    }
+
+    fun updateTimeLimit(sessionId: String, nowMillis: Long, durationMillis: Long?): Boolean {
+        val session = state.activeSession?.takeIf { it.id == sessionId && it.status == TunnelStatus.ACTIVE } ?: return false
+        val normalizedDuration = durationMillis?.takeIf { it > 0L }
+        val nextCheckIn = when {
+            session.task.isOpenEndedBrowse && normalizedDuration == null && checkInsEnabled -> {
+                state.checkIn?.takeIf {
+                    it.sessionId == session.id && it.kind == IntentionCheckInKind.OPEN_ENDED_BROWSE
+                } ?: IntentionCheckInState(
+                    sessionId = session.id,
+                    kind = IntentionCheckInKind.OPEN_ENDED_BROWSE,
+                    nextCheckAtMillis = nowMillis + browseCheckInIntervalMillis,
+                )
+            }
+            state.checkIn?.let { it.sessionId == session.id && it.kind == IntentionCheckInKind.OPEN_ENDED_BROWSE } == true -> null
+            else -> state.checkIn
+        }
+        state = state.copy(
+            activeSession = session.copy(
+                startedAtMillis = nowMillis,
+                intendedDurationMillis = normalizedDuration,
+            ),
+            checkIn = nextCheckIn,
+        )
+        return true
     }
 
     fun continueExpiredSession(nowMillis: Long) {

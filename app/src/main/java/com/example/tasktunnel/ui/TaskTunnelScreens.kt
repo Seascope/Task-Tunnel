@@ -502,9 +502,9 @@ fun ProtectionScreen(
                 ProtectedAppRow(
                     app,
                     when (app.displayName) {
-                        "Instagram" -> "Reply to messages\nBrowse intentionally"
+                        "Instagram" -> "Reply to messages\nSearch / look something up\nPost something\nBrowse intentionally"
                         "TikTok" -> "Search / watch something specific\nCheck Inbox\nBrowse intentionally"
-                        else -> "Search / watch something specific\nBrowse intentionally"
+                        else -> "Search / watch something specific\nCheck subscriptions\nWatch Shorts intentionally\nBrowse intentionally"
                     },
                 )
                 if (index < 2) RowDivider(inset = true)
@@ -806,6 +806,8 @@ fun AccessibilityDisclosureScreen(accessEnabled: Boolean, continueToSettings: ()
 fun SettingsScreen(
     appVersion: String,
     historyAvailable: Boolean,
+    notificationControlsEnabled: Boolean,
+    configureNotificationControls: () -> Unit,
     clearHistory: () -> Unit,
     openDiagnostics: () -> Unit,
     openDisclosure: () -> Unit,
@@ -852,6 +854,18 @@ fun SettingsScreen(
             )
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("Help & system", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            SettingsRow(
+                title = "Tunnel notification controls",
+                subtitle = if (notificationControlsEnabled) {
+                    "Refocus, change purpose, or end an active tunnel from notifications"
+                } else {
+                    "Off — tap to enable notification controls"
+                },
+                leading = { TaskTunnelIcon(TaskTunnelIconKind.ATTENTION, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                showChevron = true,
+                onClick = configureNotificationControls,
+            )
+            RowDivider(inset = true)
             SettingsRow(
                 title = "Protection diagnostics",
                 subtitle = "Copy sanitized device and service status",

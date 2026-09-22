@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -28,6 +29,7 @@ import com.example.tasktunnel.attention.AttentionDecision
 import com.example.tasktunnel.attention.AttentionHistory
 import com.example.tasktunnel.attention.AttentionSubtype
 import com.example.tasktunnel.attention.AttentionDatabase
+import com.example.tasktunnel.attention.taskLabel
 import com.example.tasktunnel.detector.InstagramSurfaceDetector
 import com.example.tasktunnel.detector.InstagramSurface
 import com.example.tasktunnel.detector.YouTubeSurfaceDetector
@@ -46,6 +48,7 @@ import com.example.tasktunnel.friction.AdaptiveFrictionStore
 import com.example.tasktunnel.friction.FrictionContext
 import com.example.tasktunnel.friction.FrictionOutcome
 import com.example.tasktunnel.friction.InterventionVariant
+import com.example.tasktunnel.notification.TunnelNotificationController
 import com.example.tasktunnel.tunnel.DetectedSurface
 import com.example.tasktunnel.tunnel.IntentionCheckInKind
 import com.example.tasktunnel.tunnel.IntentionalCheckInPreferences
@@ -65,6 +68,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private val adaptiveFrictionEngine = AdaptiveFrictionEngine()
     private val adaptiveFrictionStore by lazy { AdaptiveFrictionStore(applicationContext) }
     private val attentionRecorder by lazy { AttentionHistory.recorder(applicationContext) }
+    private val tunnelNotificationController by lazy { TunnelNotificationController(applicationContext) }
     private val surfaceUsageTracker by lazy {
         SurfaceUsageTracker(
             SurfaceUsageRepository(AttentionDatabase.getInstance(applicationContext).surfaceUsageSegmentDao()),
@@ -82,6 +86,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private var driftOverlayView: LinearLayout? = null
     private var visualQaOverlayView: LinearLayout? = null
     private var shownTunnelPrompt: TunnelPrompt? = null
+    private var instagramDirectedNavigationInProgress = false
+    private var youTubeDirectedNavigationInProgress = false
+    private var tikTokDirectedNavigationInProgress = false
     private var lastCaptureAtElapsed = 0L
     private var lastTargetPackage: String? = null
     private val showOverlay = Runnable { showTestOverlayNow() }
@@ -102,6 +109,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         current = this
+        tunnelNotificationController.ensureChannel()
         driftCoordinator.updateSelectedPackages(DriftPoolPreferences.load(this))
         syncTunnelState { it.copy(connected = true, lastHeartbeatMillis = System.currentTimeMillis()) }
         val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF) }
@@ -117,7 +125,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         val isInspectionEvent = isWindowEvent ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
+            event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
         if (!isInspectionEvent) return
         AccessibilityRuntime.heartbeat()
         val state = AccessibilityRuntime.state.value
@@ -141,7 +150,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         )
         updateTunnelUi()
         if (!isWindowEvent) {
-            if (shouldCapture(packageName, state.inspectionArmed)) scheduleCapture()
+            if (shouldCapture(packageName, state.inspectionArmed)) {
+                val settleDelay = if (
+                    event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+                    packageName == TikTokSurfaceDetector.TIKTOK_PACKAGE
+                ) TIKTOK_CLICK_SETTLE_MS else 0L
+                scheduleCapture(settleDelay)
+            }
             return
         }
         val targetChanged = packageName in TARGET_PACKAGES &&
@@ -192,6 +207,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             screenReceiverRegistered = false
         }
         driftCoordinator.clear()
+        tunnelNotificationController.cancel()
         if (current === this) current = null
         AccessibilityRuntime.update {
             it.copy(
@@ -209,6 +225,66 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 tunnelState = com.example.tasktunnel.tunnel.TunnelRuntimeState(),
             )
         }
+    }
+
+    fun onNotificationChangePurpose(sessionId: String) {
+        dismissNotificationShadeThen(sessionId) {
+            if (tunnelCoordinator.requestPurposeChange(sessionId, System.currentTimeMillis())) {
+                updateTunnelUi()
+            }
+        }
+    }
+
+    fun onNotificationContinue(sessionId: String) {
+        if (tunnelCoordinator.state.activeSession?.id != sessionId) return
+        dismissNotificationShadeThen(sessionId) {
+            val state = tunnelCoordinator.state
+            if (state.activeSession?.id != sessionId) return@dismissNotificationShadeThen
+            when (state.prompt) {
+                is TunnelPrompt.SessionExpired -> tunnelCoordinator.continueExpiredSession(System.currentTimeMillis())
+                is TunnelPrompt.IntentionCheckIn -> tunnelCoordinator.continueCheckIn(System.currentTimeMillis())
+                else -> return@dismissNotificationShadeThen
+            }
+            updateTunnelUi()
+            scheduleCapture(NOTIFICATION_ACTION_SETTLE_MS)
+        }
+    }
+
+    fun onNotificationEnd(sessionId: String) {
+        if (tunnelCoordinator.state.activeSession?.id != sessionId) return
+        tunnelCoordinator.endSession()
+        updateTunnelUi()
+    }
+
+    fun onNotificationDismissed(sessionId: String) {
+        if (tunnelCoordinator.state.activeSession?.id != sessionId) return
+        tunnelNotificationController.suppressForSession(sessionId)
+    }
+
+    /**
+     * Notification buttons are handled by a BroadcastReceiver, so SystemUI can still own the
+     * active accessibility window when the command arrives. Dismiss the shade first, then wait
+     * until the protected app is actually foreground before showing overlays or inspecting its tree.
+     */
+    private fun dismissNotificationShadeThen(
+        sessionId: String,
+        attemptsRemaining: Int = NOTIFICATION_ACTION_MAX_ATTEMPTS,
+        action: () -> Unit,
+    ) {
+        val session = tunnelCoordinator.state.activeSession?.takeIf { it.id == sessionId } ?: return
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+        }
+        fun awaitProtectedApp(remaining: Int) {
+            if (tunnelCoordinator.state.activeSession?.id != sessionId) return
+            if (activeRootPackage() == session.app.packageName) {
+                action()
+                return
+            }
+            if (remaining <= 0) return
+            handler.postDelayed({ awaitProtectedApp(remaining - 1) }, NOTIFICATION_ACTION_RETRY_MS)
+        }
+        handler.postDelayed({ awaitProtectedApp(attemptsRemaining) }, NOTIFICATION_ACTION_RETRY_MS)
     }
 
     fun onInspectionArmed(armed: Boolean) {
@@ -293,11 +369,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         updateTunnelUi()
     }
 
-    private fun scheduleCapture() {
+    private fun scheduleCapture(minDelayMillis: Long = 0L) {
         val elapsed = SystemClock.elapsedRealtime()
-        val remaining = CAPTURE_THROTTLE_MS - (elapsed - lastCaptureAtElapsed)
+        val throttleDelay = CAPTURE_THROTTLE_MS - (elapsed - lastCaptureAtElapsed)
+        val delay = maxOf(throttleDelay, minDelayMillis)
         handler.removeCallbacks(trailingCapture)
-        if (remaining <= 0) captureCurrentRoot() else handler.postDelayed(trailingCapture, remaining)
+        if (delay <= 0) captureCurrentRoot() else handler.postDelayed(trailingCapture, delay)
     }
 
     private fun captureCurrentRoot() {
@@ -360,8 +437,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                         editable = node.isEditable,
                         enabled = node.isEnabled,
                         visibleToUser = node.isVisibleToUser,
-                        selected = node.isSelected,
+                        selected = node.isSelected || inferWhitelistedChromeSelected(packageName, node),
                         parentIndex = parentIndex,
+                        chromeRole = inferWhitelistedChromeRole(packageName, node),
                     )
                     if (depth < MAX_DEPTH) {
                         val remainingCapacity = MAX_NODES - nodes.size - stack.size
@@ -437,6 +515,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 )
             }
             detection?.let {
+                if (youTubeDirectedNavigationInProgress) return@let
                 val surface = it.surface.toTunnelSurface()
                 val task = tunnelCoordinator.state.activeSession?.takeIf { session -> session.app.packageName == packageName }?.task
                 surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
@@ -446,6 +525,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 tunnelCoordinator.observeSurface(surface, capturedAt)
             }
             instagramDetection?.let {
+                if (instagramDirectedNavigationInProgress) return@let
                 val surface = it.surface.toTunnelSurface()
                 val task = tunnelCoordinator.state.activeSession?.takeIf { session -> session.app.packageName == packageName }?.task
                 surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
@@ -455,6 +535,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 tunnelCoordinator.observeSurface(surface, capturedAt)
             }
             tikTokDetection?.let {
+                // Routing from Inbox/Profile to Search may briefly pass through For You because
+                // TikTok only exposes the Search affordance from feed-like destinations. Do not
+                // treat that app-controlled transit surface as user drift. The final settled
+                // destination is captured immediately after routing completes.
+                if (tikTokDirectedNavigationInProgress) return@let
                 val surface = it.surface.toTunnelSurface()
                 val task = tunnelCoordinator.state.activeSession
                     ?.takeIf { session -> session.app.packageName == packageName }
@@ -481,6 +566,50 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun inferWhitelistedChromeRole(
+        packageName: String,
+        node: AccessibilityNodeInfo,
+    ): UiChromeRole? {
+        if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) return null
+        val visible = try { node.isVisibleToUser && node.isEnabled } catch (_: RuntimeException) { false }
+        if (!visible) return null
+        val className = try { node.className?.toString() } catch (_: RuntimeException) { null }
+        if (className?.endsWith("Button") != true) return null
+
+        // Only derive one of four fixed navigation roles. Raw text/content descriptions are never
+        // stored in the sanitized snapshot, fingerprint, database, or Attention history.
+        val labels = buildList {
+            try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+            try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+        }
+        fun matches(label: String) = labels.any { it == label || it.startsWith("$label,") }
+        return when {
+            matches("Home") -> UiChromeRole.YOUTUBE_HOME
+            matches("Shorts") -> UiChromeRole.YOUTUBE_SHORTS
+            matches("Subscriptions") -> UiChromeRole.YOUTUBE_SUBSCRIPTIONS
+            matches("You") -> UiChromeRole.YOUTUBE_YOU
+            else -> null
+        }
+    }
+
+    private fun inferWhitelistedChromeSelected(
+        packageName: String,
+        node: AccessibilityNodeInfo,
+    ): Boolean {
+        if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) return false
+        val role = inferWhitelistedChromeRole(packageName, node) ?: return false
+        val roleLabel = when (role) {
+            UiChromeRole.YOUTUBE_HOME -> "home"
+            UiChromeRole.YOUTUBE_SHORTS -> "shorts"
+            UiChromeRole.YOUTUBE_SUBSCRIPTIONS -> "subscriptions"
+            UiChromeRole.YOUTUBE_YOU -> "you"
+        }
+        return buildList {
+            try { node.text?.toString()?.trim()?.lowercase(java.util.Locale.ROOT)?.let(::add) } catch (_: RuntimeException) { }
+            try { node.contentDescription?.toString()?.trim()?.lowercase(java.util.Locale.ROOT)?.let(::add) } catch (_: RuntimeException) { }
+        }.any { it.startsWith(roleLabel) && "selected" in it }
+    }
+
     private fun activeRootPackage(): String? {
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return null
         return try { root.packageName?.toString() } catch (_: RuntimeException) { null } finally { recycleNode(root) }
@@ -489,6 +618,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun shouldCapture(packageName: String?, inspectionArmed: Boolean): Boolean =
         packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE ||
             packageName == InstagramSurfaceDetector.INSTAGRAM_PACKAGE ||
+            packageName == TikTokSurfaceDetector.TIKTOK_PACKAGE ||
             (BuildConfig.DEBUG && inspectionArmed && packageName in TARGET_PACKAGES)
 
     private fun installedTikTokVersion(): Pair<String?, Long?> = runCatching {
@@ -558,6 +688,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         refreshTunnelOverlay()
         refreshDriftOverlay()
         scheduleTunnelDeadline()
+        tunnelNotificationController.sync(tunnelCoordinator.state)
     }
 
     private fun scheduleTunnelDeadline() {
@@ -706,12 +837,23 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun purposeGateView(prompt: TunnelPrompt.PurposeGate) = baseTunnelOverlay(compact = true).apply {
-        var selectedDurationMillis: Long? = null
+        var selectedDurationMillis: Long? = prompt.preservedDurationMillis
+        var durationWasChanged = false
+        val durationForStart = {
+            if (prompt.replacingSessionId != null && !durationWasChanged) {
+                tunnelCoordinator.state.activeSession
+                    ?.takeIf { it.id == prompt.replacingSessionId && it.status == TunnelStatus.ACTIVE }
+                    ?.expiresAtMillis
+                    ?.let { (it - System.currentTimeMillis()).coerceAtLeast(1L) }
+            } else {
+                selectedDurationMillis
+            }
+        }
         addView(purposeGateAppIdentity(prompt.app))
         addView(purposeGateQuestion())
         val durationSelector = purposeDurationSelector()
         val durationValue = TextView(context).apply {
-            text = DURATION_CHOICES.first().label
+            text = prompt.preservedDurationMillis?.let(::formatRemainingDuration) ?: DURATION_CHOICES.first().label
             textSize = 14f
             setTextColor(COLOR_SECONDARY_TEXT)
         }
@@ -719,39 +861,59 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             SupportedApp.INSTAGRAM -> {
                 addView(purposeChoiceRow(R.drawable.ic_purpose_message, "Reply to messages", "Go straight to conversations") { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.INSTAGRAM_MESSAGES, selectedDurationMillis)
+                    startTunnel(TunnelTask.INSTAGRAM_MESSAGES, durationForStart())
+                })
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / look something up", "Find an account, post, or topic") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    startTunnel(TunnelTask.INSTAGRAM_SEARCH, durationForStart())
+                })
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_create, "Post something", "Create without falling into the feed") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    startTunnel(TunnelTask.INSTAGRAM_POST, durationForStart())
                 })
                 addView(overlayDivider())
                 addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.INSTAGRAM_BROWSE, selectedDurationMillis)
+                    startTunnel(TunnelTask.INSTAGRAM_BROWSE, durationForStart())
                 })
             }
             SupportedApp.YOUTUBE -> {
                 addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch") { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.YOUTUBE_SEARCH_WATCH, selectedDurationMillis)
+                    startTunnel(TunnelTask.YOUTUBE_SEARCH_WATCH, durationForStart())
+                })
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_subscriptions, "Check subscriptions", "See new videos from channels you chose") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    startTunnel(TunnelTask.YOUTUBE_SUBSCRIPTIONS, durationForStart())
+                })
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_shorts, "Watch Shorts intentionally", "Short-form, but on purpose") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    startTunnel(TunnelTask.YOUTUBE_SHORTS, durationForStart())
                 })
                 addView(overlayDivider())
                 addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.YOUTUBE_BROWSE, selectedDurationMillis)
+                    startTunnel(TunnelTask.YOUTUBE_BROWSE, durationForStart())
                 })
             }
             SupportedApp.TIKTOK -> {
                 addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch") { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.TIKTOK_SEARCH_WATCH, selectedDurationMillis)
+                    startTunnel(TunnelTask.TIKTOK_SEARCH_WATCH, durationForStart())
                 })
                 addView(overlayDivider())
                 addView(purposeChoiceRow(R.drawable.ic_purpose_message, "Check Inbox", "Check messages and notifications") { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.TIKTOK_INBOX, selectedDurationMillis)
+                    startTunnel(TunnelTask.TIKTOK_INBOX, durationForStart())
                 })
                 addView(overlayDivider())
                 addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.TIKTOK_BROWSE, selectedDurationMillis)
+                    startTunnel(TunnelTask.TIKTOK_BROWSE, durationForStart())
                 })
             }
         }
@@ -762,15 +924,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
         addView(timeLimitRow)
         durationSelector.onDurationSelected = { choice ->
+            durationWasChanged = true
             selectedDurationMillis = choice.durationMillis
             durationValue.text = choice.label
             durationSelector.visibility = View.GONE
             timeLimitRow.visibility = View.VISIBLE
         }
         addView(durationSelector)
-        addView(purposeDismissButton {
+        addView(purposeDismissButton(if (prompt.replacingSessionId != null) "Keep current purpose" else "Not now") {
             tunnelCoordinator.dismissPurposeGate()
             updateTunnelUi()
+            scheduleCapture()
         })
     }
 
@@ -788,7 +952,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         addView(overlayPrimaryButton(returnLabel(prompt.task)) {
             val session = tunnelCoordinator.state.activeSession
             val nowMillis = System.currentTimeMillis()
-            if (tunnelCoordinator.returnFromIntervention(nowMillis)) {
+            val directedDestination = prompt.task.hasDirectedDestination()
+            if (tunnelCoordinator.returnFromIntervention(nowMillis, addReturnCooldown = !directedDestination)) {
                 session?.let {
                     attentionRecorder.tunnelDecision(
                         it,
@@ -802,9 +967,38 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     recordFrictionOutcome(prompt, variant, FrictionOutcome.RETURN)
                 }
                 updateTunnelUi()
-                performGlobalAction(GLOBAL_ACTION_BACK)
+                if (prompt.task.hasDirectedDestination()) {
+                    navigateToTaskDestinationAfterOverlayDismiss(prompt.task)
+                } else {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
             }
         })
+
+        if (prompt.task == TunnelTask.TIKTOK_SEARCH_WATCH && prompt.surface == DetectedSurface.TIKTOK_FEED) {
+            addView(overlayTextButton("Go to messages") {
+                val session = tunnelCoordinator.state.activeSession?.takeIf {
+                    it.id == prompt.sessionId && tunnelCoordinator.state.prompt == prompt
+                }
+                if (session != null) {
+                    val nowMillis = System.currentTimeMillis()
+                    if (tunnelCoordinator.returnFromIntervention(nowMillis, addReturnCooldown = false)) {
+                        attentionRecorder.tunnelDecision(
+                            session,
+                            AttentionSubtype.RETURN,
+                            AttentionDecision.RETURN,
+                            nowMillis,
+                            prompt.surface,
+                        )
+                        if (learningEnabled) {
+                            recordFrictionOutcome(prompt, variant, FrictionOutcome.RETURN)
+                        }
+                        updateTunnelUi()
+                        navigateToTaskDestinationAfterOverlayDismiss(TunnelTask.TIKTOK_INBOX)
+                    }
+                }
+            })
+        }
 
         val allowLabel = "Allow $surface for now"
         val allowAction = {
@@ -877,12 +1071,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             addView(overlayPrimaryButton(returnLabel(prompt.task)) {
                 if (tunnelCoordinator.state.prompt != prompt) return@overlayPrimaryButton
                 val nowMillis = System.currentTimeMillis()
-                if (tunnelCoordinator.returnFromCheckIn(nowMillis)) {
+                val directedDestination = prompt.task.hasDirectedDestination()
+                if (tunnelCoordinator.returnFromCheckIn(nowMillis, addReturnCooldown = !directedDestination)) {
                     session?.let {
                         attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_RETURN, AttentionDecision.CHECK_IN_RETURN, nowMillis, prompt.surface)
                     }
                     updateTunnelUi()
-                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    if (directedDestination) {
+                        navigateToTaskDestinationAfterOverlayDismiss(prompt.task)
+                    } else {
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                    }
                 }
             })
             addView(overlayTextButton(if (prompt.surface == DetectedSurface.INSTAGRAM_EXPLORE) "Keep exploring" else "Keep watching") {
@@ -954,7 +1153,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     ): String = when (variant) {
         InterventionVariant.INTENT_RECALL -> when (prompt.task) {
             TunnelTask.INSTAGRAM_MESSAGES -> "Still here to reply?"
+            TunnelTask.INSTAGRAM_SEARCH -> "Still looking for something specific?"
+            TunnelTask.INSTAGRAM_POST -> "Still here to post?"
             TunnelTask.YOUTUBE_SEARCH_WATCH -> "Still here for something specific?"
+            TunnelTask.YOUTUBE_SUBSCRIPTIONS -> "Still checking subscriptions?"
+            TunnelTask.YOUTUBE_SHORTS -> "Still watching Shorts intentionally?"
             TunnelTask.TIKTOK_SEARCH_WATCH -> "Still here for something specific?"
             TunnelTask.TIKTOK_INBOX -> "Still here to check your Inbox?"
             TunnelTask.INSTAGRAM_BROWSE,
@@ -975,8 +1178,16 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         InterventionVariant.INTENT_RECALL -> when (prompt.task) {
             TunnelTask.INSTAGRAM_MESSAGES ->
                 "You opened Instagram to reply to messages. $surface is outside that purpose."
+            TunnelTask.INSTAGRAM_SEARCH ->
+                "You opened Instagram to look something up. $surface is outside that purpose."
+            TunnelTask.INSTAGRAM_POST ->
+                "You opened Instagram to post something. $surface is outside that purpose."
             TunnelTask.YOUTUBE_SEARCH_WATCH ->
                 "You opened YouTube to search for or watch something. $surface is outside that purpose."
+            TunnelTask.YOUTUBE_SUBSCRIPTIONS ->
+                "You opened YouTube to check subscriptions. $surface is outside that purpose."
+            TunnelTask.YOUTUBE_SHORTS ->
+                "You chose to watch Shorts intentionally. $surface is outside that purpose."
             TunnelTask.TIKTOK_SEARCH_WATCH ->
                 "You opened TikTok to search for or watch something. $surface is outside that purpose."
             TunnelTask.TIKTOK_INBOX ->
@@ -1040,12 +1251,671 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun startTunnel(task: TunnelTask, intendedDurationMillis: Long?) {
         val nowMillis = System.currentTimeMillis()
-        tunnelCoordinator.startSession(task, nowMillis, intendedDurationMillis)
+        val directedDestination = task.hasDirectedDestination()
+        tunnelCoordinator.startSession(
+            task = task,
+            nowMillis = nowMillis,
+            intendedDurationMillis = intendedDurationMillis,
+            evaluateCurrentSurface = !directedDestination,
+        )
         tunnelCoordinator.state.activeSession?.let { attentionRecorder.purposeSelected(it, nowMillis) }
         driftCoordinator.clear()
         updateTunnelUi()
-        scheduleCapture()
+        if (directedDestination) {
+            navigateToTaskDestinationAfterOverlayDismiss(task)
+        } else {
+            scheduleCapture()
+        }
     }
+
+    private fun TunnelTask.hasDirectedDestination(): Boolean = when (this) {
+        TunnelTask.INSTAGRAM_MESSAGES,
+        TunnelTask.INSTAGRAM_SEARCH,
+        TunnelTask.INSTAGRAM_POST,
+        TunnelTask.YOUTUBE_SEARCH_WATCH,
+        TunnelTask.YOUTUBE_SUBSCRIPTIONS,
+        TunnelTask.YOUTUBE_SHORTS,
+        TunnelTask.TIKTOK_SEARCH_WATCH,
+        TunnelTask.TIKTOK_INBOX,
+        -> true
+        TunnelTask.INSTAGRAM_BROWSE,
+        TunnelTask.YOUTUBE_BROWSE,
+        TunnelTask.TIKTOK_BROWSE,
+        -> false
+    }
+
+    private fun navigateToTaskDestinationAfterOverlayDismiss(task: TunnelTask) {
+        handler.postDelayed({
+            if (task == TunnelTask.TIKTOK_SEARCH_WATCH) {
+                navigateToTikTokSearch()
+                return@postDelayed
+            }
+            if (task == TunnelTask.TIKTOK_INBOX) {
+                navigateToTikTokInbox()
+                return@postDelayed
+            }
+            if (task == TunnelTask.INSTAGRAM_SEARCH || task == TunnelTask.INSTAGRAM_POST) {
+                navigateToInstagramDestination(task)
+                return@postDelayed
+            }
+            if (task == TunnelTask.YOUTUBE_SEARCH_WATCH || task == TunnelTask.YOUTUBE_SUBSCRIPTIONS || task == TunnelTask.YOUTUBE_SHORTS) {
+                navigateToYouTubeDestination(task)
+                return@postDelayed
+            }
+            val navigated = navigateToTaskDestination(task)
+            if (!navigated) {
+                // A directed tunnel must never silently accept the surface it started on.
+                tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
+                updateTunnelUi()
+            }
+            handler.postDelayed({ captureCurrentRoot() }, DESTINATION_NAVIGATION_SETTLE_MS)
+        }, OVERLAY_DISMISS_SETTLE_MS)
+    }
+
+    private fun navigateToInstagramDestination(task: TunnelTask) {
+        if (task == TunnelTask.INSTAGRAM_POST) {
+            navigateToInstagramCreate()
+            return
+        }
+
+        instagramDirectedNavigationInProgress = true
+        if (navigateToTaskDestination(task)) {
+            finishInstagramDirectedNavigationAfterSettle()
+            return
+        }
+        backTowardInstagramMainShell(task, DIRECTED_TAB_MAX_BACK_STEPS)
+    }
+
+    /**
+     * Instagram moves its Create entry point between bottom navigation and action/profile bars
+     * across builds. Do not use blind GLOBAL_ACTION_BACK retries for posting: from a top-level
+     * Instagram screen that can background the app. Instead, try Create in-place, route to a
+     * known main-shell destination, and retry from there/profile.
+     */
+    private fun navigateToInstagramCreate() {
+        instagramDirectedNavigationInProgress = true
+        if (isInstagramCreateFlowVisible()) {
+            finishInstagramDirectedNavigationAfterSettle()
+            return
+        }
+        if (clickInstagramCreateAffordance()) {
+            finishInstagramDirectedNavigationAfterSettle()
+            return
+        }
+
+        when {
+            clickInstagramHomeAffordance() ->
+                handler.postDelayed({ retryInstagramCreateFromMainShell() }, DESTINATION_NAVIGATION_SETTLE_MS)
+            openInstagramMainFeed() ->
+                handler.postDelayed({ retryInstagramCreateFromMainShell() }, INSTAGRAM_MAIN_FEED_SETTLE_MS)
+            else -> failInstagramDirectedNavigation()
+        }
+    }
+
+    private fun retryInstagramCreateFromMainShell() {
+        if (isInstagramCreateFlowVisible() || clickInstagramCreateAffordance()) {
+            finishInstagramDirectedNavigationAfterSettle()
+            return
+        }
+        if (!clickInstagramProfileAffordance()) {
+            failInstagramDirectedNavigation()
+            return
+        }
+        handler.postDelayed({
+            if (isInstagramCreateFlowVisible() || clickInstagramCreateAffordance()) {
+                finishInstagramDirectedNavigationAfterSettle()
+            } else {
+                failInstagramDirectedNavigation()
+            }
+        }, DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun backTowardInstagramMainShell(task: TunnelTask, backStepsRemaining: Int) {
+        if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
+            failInstagramDirectedNavigation()
+            return
+        }
+        handler.postDelayed({
+            if (navigateToTaskDestination(task)) {
+                finishInstagramDirectedNavigationAfterSettle()
+            } else {
+                backTowardInstagramMainShell(task, backStepsRemaining - 1)
+            }
+        }, DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun finishInstagramDirectedNavigationAfterSettle() {
+        handler.postDelayed({
+            instagramDirectedNavigationInProgress = false
+            handler.removeCallbacks(trailingCapture)
+            captureCurrentRoot()
+        }, DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun failInstagramDirectedNavigation() {
+        instagramDirectedNavigationInProgress = false
+        handler.removeCallbacks(trailingCapture)
+        captureCurrentRoot()
+    }
+
+    private fun clickInstagramSearchAffordance(): Boolean = clickAppAffordance(
+        packageName = InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
+        resourceIds = listOf("search_tab"),
+        // Do not match the generic label "Search": Instagram DMs expose their own search box,
+        // which can otherwise steal this action. The global Explore tab has a stable search_tab ID.
+        contentDescriptions = setOf("Explore"),
+        textLabels = setOf("Explore"),
+    )
+
+    private fun clickInstagramCreateAffordance(): Boolean = clickAppAffordance(
+        packageName = InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
+        resourceIds = listOf(
+            "creation_tab",
+            "create_tab",
+            "creation_button",
+            "create_button",
+            "new_post_button",
+            "action_bar_create_button",
+            "profile_action_bar_create_button",
+            "profile_header_create_button",
+        ),
+        contentDescriptions = setOf("Create", "New post", "Create post", "Create new post"),
+        textLabels = setOf("Create", "New post", "Create post", "Create new post"),
+    )
+
+    private fun clickInstagramHomeAffordance(): Boolean = clickAppAffordance(
+        packageName = InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
+        resourceIds = listOf("feed_tab"),
+        contentDescriptions = setOf("Home"),
+        textLabels = setOf("Home"),
+    )
+
+    private fun clickInstagramProfileAffordance(): Boolean = clickAppAffordance(
+        packageName = InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
+        resourceIds = listOf("profile_tab"),
+        contentDescriptions = setOf("Profile"),
+        textLabels = setOf("Profile"),
+    )
+
+    private fun isInstagramCreateFlowVisible(): Boolean {
+        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
+        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
+        if (rootPackage != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) {
+            recycleNode(root)
+            return false
+        }
+        val createFlowIds = setOf(
+            "gallery_picker_grid_item_container",
+            "gallery_picker_container",
+            "media_picker_container",
+            "creation_root",
+            "creation_main_container",
+        )
+        val createFlowLabels = setOf("New post", "Create new post")
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        return try {
+            stack.addLast(root)
+            while (stack.isNotEmpty()) {
+                val node = stack.removeLast()
+                val ownsNode = node !== root
+                try {
+                    val visible = try { node.isVisibleToUser } catch (_: RuntimeException) { false }
+                    val resourceId = try { node.viewIdResourceName?.substringAfterLast('/') } catch (_: RuntimeException) { null }
+                    val label = try { node.text?.toString()?.trim() } catch (_: RuntimeException) { null }
+                    val description = try { node.contentDescription?.toString()?.trim() } catch (_: RuntimeException) { null }
+                    if (visible && (
+                            (resourceId != null && resourceId in createFlowIds) ||
+                                (label != null && label in createFlowLabels) ||
+                                (description != null && description in createFlowLabels)
+                            )) {
+                        while (stack.isNotEmpty()) {
+                            val pending = stack.removeLast()
+                            if (pending !== root) recycleNode(pending)
+                        }
+                        return true
+                    }
+                    for (index in node.childCount - 1 downTo 0) node.getChild(index)?.let(stack::addLast)
+                } finally {
+                    if (ownsNode) recycleNode(node)
+                }
+            }
+            false
+        } finally {
+            while (stack.isNotEmpty()) {
+                val pending = stack.removeLast()
+                if (pending !== root) recycleNode(pending)
+            }
+            recycleNode(root)
+        }
+    }
+
+    private fun openInstagramMainFeed(): Boolean = runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.instagram.com/_n/mainfeed/")).apply {
+            setPackage(InstagramSurfaceDetector.INSTAGRAM_PACKAGE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+        true
+    }.getOrDefault(false)
+
+    private fun navigateToYouTubeDestination(task: TunnelTask) {
+        youTubeDirectedNavigationInProgress = true
+        if (navigateToTaskDestination(task)) {
+            finishYouTubeDirectedNavigationAfterSettle()
+            return
+        }
+
+        // Never blindly press Back from YouTube's top-level shell. If a tab affordance is not
+        // exposed there, GLOBAL_ACTION_BACK can background/close YouTube. Only unwind surfaces
+        // that the detector positively identifies as nested navigation.
+        if (currentYouTubeSurfaceAllowsBackNavigation()) {
+            backTowardYouTubeMainShell(task, DIRECTED_TAB_MAX_BACK_STEPS)
+        } else {
+            failYouTubeDirectedNavigation()
+        }
+    }
+
+    private fun currentYouTubeSurfaceAllowsBackNavigation(): Boolean =
+        when (AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface) {
+            YouTubeSurface.YOUTUBE_SEARCH,
+            YouTubeSurface.YOUTUBE_VIDEO,
+            -> true
+            else -> false
+        }
+
+    private fun backTowardYouTubeMainShell(task: TunnelTask, backStepsRemaining: Int) {
+        if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
+            failYouTubeDirectedNavigation()
+            return
+        }
+        handler.postDelayed({
+            if (navigateToTaskDestination(task)) {
+                finishYouTubeDirectedNavigationAfterSettle()
+            } else if (hasYouTubeTopLevelChrome()) {
+                // We have already reached YouTube's main shell. Do not issue another Back merely
+                // because the requested tab is not clickable in this app build.
+                failYouTubeDirectedNavigation()
+            } else {
+                backTowardYouTubeMainShell(task, backStepsRemaining - 1)
+            }
+        }, DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun hasYouTubeTopLevelChrome(): Boolean {
+        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
+        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
+        if (rootPackage != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
+            recycleNode(root)
+            return false
+        }
+        val knownLabels = setOf("Home", "Shorts", "Subscriptions", "You")
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        return try {
+            stack.addLast(root)
+            while (stack.isNotEmpty()) {
+                val node = stack.removeLast()
+                val ownsNode = node !== root
+                try {
+                    val visible = try { node.isVisibleToUser } catch (_: RuntimeException) { false }
+                    val labels = buildList {
+                        try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+                        try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+                    }
+                    if (visible && labels.any { label -> knownLabels.any { label == it || label.startsWith("$it,") } }) {
+                        while (stack.isNotEmpty()) {
+                            val pending = stack.removeLast()
+                            if (pending !== root) recycleNode(pending)
+                        }
+                        return true
+                    }
+                    for (index in node.childCount - 1 downTo 0) node.getChild(index)?.let(stack::addLast)
+                } finally {
+                    if (ownsNode) recycleNode(node)
+                }
+            }
+            false
+        } finally {
+            while (stack.isNotEmpty()) {
+                val pending = stack.removeLast()
+                if (pending !== root) recycleNode(pending)
+            }
+            recycleNode(root)
+        }
+    }
+
+    private fun finishYouTubeDirectedNavigationAfterSettle() {
+        handler.postDelayed({
+            youTubeDirectedNavigationInProgress = false
+            handler.removeCallbacks(trailingCapture)
+            captureCurrentRoot()
+        }, DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun failYouTubeDirectedNavigation() {
+        youTubeDirectedNavigationInProgress = false
+        handler.removeCallbacks(trailingCapture)
+        captureCurrentRoot()
+    }
+
+    private fun clickYouTubeSearchAffordance(): Boolean = clickAppAffordance(
+        packageName = YouTubeSurfaceDetector.YOUTUBE_PACKAGE,
+        contentDescriptions = setOf("Search"),
+        textLabels = setOf("Search"),
+    )
+
+    private fun clickYouTubeSubscriptionsAffordance(): Boolean =
+        clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_SUBSCRIPTIONS)
+
+    private fun clickYouTubeShortsAffordance(): Boolean =
+        clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_SHORTS)
+
+    private fun clickYouTubeChromeAffordance(role: UiChromeRole): Boolean {
+        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
+        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
+        if (rootPackage != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
+            recycleNode(root)
+            return false
+        }
+        val wantedLabel = when (role) {
+            UiChromeRole.YOUTUBE_HOME -> "Home"
+            UiChromeRole.YOUTUBE_SHORTS -> "Shorts"
+            UiChromeRole.YOUTUBE_SUBSCRIPTIONS -> "Subscriptions"
+            UiChromeRole.YOUTUBE_YOU -> "You"
+        }
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        try {
+            // YouTube's bottom navigation is not guaranteed to expose each tab as a Button class.
+            // Route using the exact, whitelisted chrome label and click its clickable ancestor.
+            // Prefix-with-comma handles descriptions such as "Subscriptions, new activity" while
+            // still avoiding arbitrary content labels.
+            stack.addLast(root)
+            while (stack.isNotEmpty()) {
+                val node = stack.removeLast()
+                val ownsNode = node !== root
+                try {
+                    val usable = try { node.isVisibleToUser && node.isEnabled } catch (_: RuntimeException) { false }
+                    val labels = buildList {
+                        try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+                        try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+                    }
+                    val matchesRole = labels.any { it == wantedLabel || it.startsWith("$wantedLabel,") }
+                    if (usable && matchesRole && performClickOnNodeOrParent(node)) {
+                        while (stack.isNotEmpty()) {
+                            val pending = stack.removeLast()
+                            if (pending !== root) recycleNode(pending)
+                        }
+                        return true
+                    }
+                    for (index in node.childCount - 1 downTo 0) node.getChild(index)?.let(stack::addLast)
+                } finally {
+                    if (ownsNode) recycleNode(node)
+                }
+            }
+            return false
+        } finally {
+            while (stack.isNotEmpty()) {
+                val pending = stack.removeLast()
+                if (pending !== root) recycleNode(pending)
+            }
+            recycleNode(root)
+        }
+    }
+
+    private fun navigateToTikTokSearch() {
+        tikTokDirectedNavigationInProgress = true
+        val currentSurface = tunnelCoordinator.state.currentSurface
+        if (currentSurface == DetectedSurface.TIKTOK_SEARCH) {
+            finishTikTokDirectedNavigationAfterSettle()
+            return
+        }
+        if (currentSurface == DetectedSurface.TIKTOK_FEED && clickTikTokSearchAffordance()) {
+            finishTikTokDirectedNavigationAfterSettle()
+            return
+        }
+
+        // TikTok 47.x can expose unrelated Search controls inside Inbox/Profile. Avoid
+        // clicking those. Route through the stable For You tab (`omq`) first, then click
+        // the global Search affordance once that screen has settled.
+        val routedToFeed = clickAppAffordance(
+            packageName = TikTokSurfaceDetector.TIKTOK_PACKAGE,
+            resourceIds = listOf("omq"),
+            contentDescriptions = setOf("For You", "Home"),
+            textLabels = setOf("For You", "Home"),
+        )
+        if (!routedToFeed) {
+            tikTokDirectedNavigationInProgress = false
+            tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
+            updateTunnelUi()
+            handler.postDelayed({ captureCurrentRoot() }, DESTINATION_NAVIGATION_SETTLE_MS)
+            return
+        }
+
+        handler.postDelayed({
+            if (clickTikTokSearchAffordance()) {
+                finishTikTokDirectedNavigationAfterSettle()
+            } else {
+                // Fail visibly on the settled surface instead of pretending navigation worked.
+                tikTokDirectedNavigationInProgress = false
+                handler.removeCallbacks(trailingCapture)
+                captureCurrentRoot()
+            }
+        }, TIKTOK_ROUTE_STEP_SETTLE_MS)
+    }
+
+    private fun clickTikTokSearchAffordance(): Boolean = clickAppAffordance(
+        packageName = TikTokSurfaceDetector.TIKTOK_PACKAGE,
+        resourceIds = listOf("search", "search_button", "search_icon"),
+        contentDescriptions = setOf("Search"),
+        textLabels = setOf("Search"),
+    )
+
+    private fun navigateToTikTokInbox() {
+        tikTokDirectedNavigationInProgress = true
+        if (isTikTokInboxSelected()) {
+            finishTikTokDirectedNavigationAfterSettle()
+            return
+        }
+        if (clickTikTokInboxAffordance()) {
+            handler.postDelayed(
+                { verifyTikTokInboxOrBack(TIKTOK_INBOX_MAX_BACK_STEPS) },
+                DESTINATION_NAVIGATION_SETTLE_MS,
+            )
+            return
+        }
+        backTowardTikTokMainShell(TIKTOK_INBOX_MAX_BACK_STEPS)
+    }
+
+    private fun verifyTikTokInboxOrBack(backStepsRemaining: Int) {
+        if (isTikTokInboxSelected()) {
+            finishTikTokDirectedNavigationAfterSettle()
+        } else {
+            backTowardTikTokMainShell(backStepsRemaining)
+        }
+    }
+
+    private fun backTowardTikTokMainShell(backStepsRemaining: Int) {
+        if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
+            failTikTokDirectedNavigation()
+            return
+        }
+        handler.postDelayed({
+            if (isTikTokInboxSelected()) {
+                finishTikTokDirectedNavigationAfterSettle()
+                return@postDelayed
+            }
+            if (clickTikTokInboxAffordance()) {
+                handler.postDelayed(
+                    { verifyTikTokInboxOrBack(backStepsRemaining - 1) },
+                    DESTINATION_NAVIGATION_SETTLE_MS,
+                )
+            } else {
+                backTowardTikTokMainShell(backStepsRemaining - 1)
+            }
+        }, TIKTOK_ROUTE_STEP_SETTLE_MS)
+    }
+
+    private fun clickTikTokInboxAffordance(): Boolean = clickAppAffordance(
+        packageName = TikTokSurfaceDetector.TIKTOK_PACKAGE,
+        resourceIds = listOf("omr"),
+        contentDescriptions = setOf("Inbox"),
+    )
+
+    private fun isTikTokInboxSelected(): Boolean {
+        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
+        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
+        if (rootPackage != TikTokSurfaceDetector.TIKTOK_PACKAGE) {
+            recycleNode(root)
+            return false
+        }
+        return try {
+            val matches = try {
+                root.findAccessibilityNodeInfosByViewId("${TikTokSurfaceDetector.TIKTOK_PACKAGE}:id/omr")
+            } catch (_: RuntimeException) {
+                emptyList()
+            }
+            try {
+                matches.any { node ->
+                    try { node.isVisibleToUser && node.isSelected } catch (_: RuntimeException) { false }
+                }
+            } finally {
+                matches.forEach(::recycleNode)
+            }
+        } finally {
+            recycleNode(root)
+        }
+    }
+
+    private fun failTikTokDirectedNavigation() {
+        tikTokDirectedNavigationInProgress = false
+        handler.removeCallbacks(trailingCapture)
+        captureCurrentRoot()
+    }
+
+    private fun finishTikTokDirectedNavigationAfterSettle() {
+        handler.postDelayed({
+            tikTokDirectedNavigationInProgress = false
+            handler.removeCallbacks(trailingCapture)
+            captureCurrentRoot()
+        }, DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun navigateToTaskDestination(task: TunnelTask): Boolean = when (task) {
+        TunnelTask.INSTAGRAM_MESSAGES ->
+            clickAppAffordance(
+                packageName = InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
+                resourceIds = listOf("direct_tab"),
+                contentDescriptions = setOf("Messages", "Direct"),
+                textLabels = setOf("Messages"),
+            ) || openInstagramDirectInbox()
+        TunnelTask.INSTAGRAM_SEARCH -> clickInstagramSearchAffordance()
+        TunnelTask.INSTAGRAM_POST -> clickInstagramCreateAffordance()
+        TunnelTask.YOUTUBE_SEARCH_WATCH -> clickYouTubeSearchAffordance()
+        TunnelTask.YOUTUBE_SUBSCRIPTIONS -> clickYouTubeSubscriptionsAffordance()
+        TunnelTask.YOUTUBE_SHORTS -> clickYouTubeShortsAffordance()
+        TunnelTask.TIKTOK_SEARCH_WATCH -> clickTikTokSearchAffordance()
+        TunnelTask.TIKTOK_INBOX -> clickTikTokInboxAffordance()
+        TunnelTask.INSTAGRAM_BROWSE,
+        TunnelTask.YOUTUBE_BROWSE,
+        TunnelTask.TIKTOK_BROWSE,
+        -> false
+    }
+
+    private fun clickAppAffordance(
+        packageName: String,
+        resourceIds: List<String> = emptyList(),
+        contentDescriptions: Set<String> = emptySet(),
+        textLabels: Set<String> = emptySet(),
+    ): Boolean {
+        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
+        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
+        if (rootPackage != packageName) {
+            recycleNode(root)
+            return false
+        }
+        try {
+            for (id in resourceIds) {
+                val matches = try {
+                    root.findAccessibilityNodeInfosByViewId("$packageName:id/$id")
+                } catch (_: RuntimeException) {
+                    emptyList()
+                }
+                var clicked = false
+                try {
+                    for (node in matches) {
+                        val usable = try { node.isVisibleToUser && node.isEnabled } catch (_: RuntimeException) { false }
+                        if (usable && performClickOnNodeOrParent(node)) {
+                            clicked = true
+                            break
+                        }
+                    }
+                } finally {
+                    matches.forEach(::recycleNode)
+                }
+                if (clicked) return true
+            }
+
+            if (contentDescriptions.isEmpty() && textLabels.isEmpty()) return false
+            val wantedDescriptions = contentDescriptions.map { it.lowercase(java.util.Locale.ROOT) }.toSet()
+            val wantedText = textLabels.map { it.lowercase(java.util.Locale.ROOT) }.toSet()
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            for (index in root.childCount - 1 downTo 0) {
+                root.getChild(index)?.let(stack::addLast)
+            }
+            var clicked = false
+            while (stack.isNotEmpty() && !clicked) {
+                val node = stack.removeLast()
+                try {
+                    val description = try { node.contentDescription?.toString()?.trim() } catch (_: RuntimeException) { null }
+                    val text = try { node.text?.toString()?.trim() } catch (_: RuntimeException) { null }
+                    val isMatch = description?.lowercase(java.util.Locale.ROOT) in wantedDescriptions ||
+                        text?.lowercase(java.util.Locale.ROOT) in wantedText
+                    val usable = try { node.isVisibleToUser && node.isEnabled } catch (_: RuntimeException) { false }
+                    if (isMatch && usable && performClickOnNodeOrParent(node)) {
+                        clicked = true
+                    } else {
+                        for (index in node.childCount - 1 downTo 0) {
+                            node.getChild(index)?.let(stack::addLast)
+                        }
+                    }
+                } finally {
+                    recycleNode(node)
+                }
+            }
+            while (stack.isNotEmpty()) recycleNode(stack.removeLast())
+            return clicked
+        } finally {
+            recycleNode(root)
+        }
+    }
+
+    private fun performClickOnNodeOrParent(node: AccessibilityNodeInfo): Boolean {
+        var current: AccessibilityNodeInfo? = node
+        var ownsCurrent = false
+        repeat(MAX_CLICK_ANCESTOR_DEPTH) {
+            val candidate = current ?: return false
+            val clickable = try { candidate.isClickable && candidate.isEnabled } catch (_: RuntimeException) { false }
+            if (clickable) {
+                val clicked = try { candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK) } catch (_: RuntimeException) { false }
+                if (ownsCurrent) recycleNode(candidate)
+                return clicked
+            }
+            val parent = try { candidate.parent } catch (_: RuntimeException) { null }
+            if (ownsCurrent) recycleNode(candidate)
+            current = parent
+            ownsCurrent = parent != null
+        }
+        current?.takeIf { ownsCurrent }?.let(::recycleNode)
+        return false
+    }
+
+    private fun openInstagramDirectInbox(): Boolean = runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("instagram://direct-inbox")).apply {
+            setPackage(InstagramSurfaceDetector.INSTAGRAM_PACKAGE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+        true
+    }.getOrDefault(false)
 
     private fun baseTunnelOverlay(compact: Boolean = false) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -1219,8 +2089,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         setOnClickListener { action() }
     }
 
-    private fun purposeDismissButton(action: () -> Unit) = TextView(this).apply {
-        text = "Not now"
+    private fun purposeDismissButton(label: String = "Not now", action: () -> Unit) = TextView(this).apply {
+        text = label
         gravity = Gravity.CENTER
         textSize = 14f
         setTextColor(COLOR_SECONDARY_TEXT)
@@ -1370,8 +2240,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun taskReminder(task: TunnelTask): String = when (task) {
         TunnelTask.INSTAGRAM_MESSAGES -> "You came here to reply to messages."
+        TunnelTask.INSTAGRAM_SEARCH -> "You came here to look something up."
+        TunnelTask.INSTAGRAM_POST -> "You came here to post something."
         TunnelTask.INSTAGRAM_BROWSE -> "You came here to browse intentionally."
         TunnelTask.YOUTUBE_SEARCH_WATCH -> "You came here to search for or watch something."
+        TunnelTask.YOUTUBE_SUBSCRIPTIONS -> "You came here to check subscriptions."
+        TunnelTask.YOUTUBE_SHORTS -> "You came here to watch Shorts intentionally."
         TunnelTask.YOUTUBE_BROWSE -> "You came here to browse intentionally."
         TunnelTask.TIKTOK_SEARCH_WATCH -> "You came here to search for or watch something."
         TunnelTask.TIKTOK_INBOX -> "You came here to check your Inbox."
@@ -1380,13 +2254,26 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun returnLabel(task: TunnelTask): String = when (task) {
         TunnelTask.INSTAGRAM_MESSAGES -> "Return to Messages"
-        TunnelTask.YOUTUBE_SEARCH_WATCH -> "Return to Search / video"
+        TunnelTask.INSTAGRAM_SEARCH -> "Return to Search"
+        TunnelTask.INSTAGRAM_POST -> "Return to Create"
+        TunnelTask.YOUTUBE_SEARCH_WATCH -> "Return to Search"
+        TunnelTask.YOUTUBE_SUBSCRIPTIONS -> "Return to Subscriptions"
+        TunnelTask.YOUTUBE_SHORTS -> "Return to Shorts"
         TunnelTask.INSTAGRAM_BROWSE,
         TunnelTask.YOUTUBE_BROWSE,
         TunnelTask.TIKTOK_BROWSE,
         -> "Return"
         TunnelTask.TIKTOK_SEARCH_WATCH -> "Return to Search"
         TunnelTask.TIKTOK_INBOX -> "Return to Inbox"
+    }
+
+    private fun formatRemainingDuration(durationMillis: Long): String {
+        val totalMinutes = ((durationMillis + 59_999L) / 60_000L).coerceAtLeast(1L)
+        return if (totalMinutes < 60L) "$totalMinutes min" else {
+            val hours = totalMinutes / 60L
+            val minutes = totalMinutes % 60L
+            if (minutes == 0L) "$hours h" else "$hours h $minutes min"
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -1406,7 +2293,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun surfaceLabel(surface: DetectedSurface): String = when (surface) {
         DetectedSurface.INSTAGRAM_REELS -> "Reels"
         DetectedSurface.INSTAGRAM_EXPLORE -> "Explore"
+        DetectedSurface.INSTAGRAM_HOME -> "Home"
+        DetectedSurface.INSTAGRAM_PROFILE -> "Profile"
+        DetectedSurface.INSTAGRAM_CREATE -> "Create"
         DetectedSurface.YOUTUBE_SHORTS -> "Shorts"
+        DetectedSurface.YOUTUBE_HOME -> "Home"
+        DetectedSurface.YOUTUBE_SUBSCRIPTIONS -> "Subscriptions"
+        DetectedSurface.YOUTUBE_YOU -> "You"
         DetectedSurface.TIKTOK_FEED -> "For You"
         DetectedSurface.TIKTOK_FRIENDS -> "Friends"
         DetectedSurface.TIKTOK_SEARCH -> "Search"
@@ -1421,6 +2314,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         InstagramSurface.INSTAGRAM_EXPLORE -> DetectedSurface.INSTAGRAM_EXPLORE
         InstagramSurface.INSTAGRAM_REELS -> DetectedSurface.INSTAGRAM_REELS
         InstagramSurface.INSTAGRAM_HOME -> DetectedSurface.INSTAGRAM_HOME
+        InstagramSurface.INSTAGRAM_PROFILE -> DetectedSurface.INSTAGRAM_PROFILE
+        InstagramSurface.INSTAGRAM_CREATE -> DetectedSurface.INSTAGRAM_CREATE
         InstagramSurface.INSTAGRAM_OTHER -> DetectedSurface.INSTAGRAM_OTHER
         InstagramSurface.UNKNOWN -> DetectedSurface.UNKNOWN
     }
@@ -1429,6 +2324,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         YouTubeSurface.YOUTUBE_SEARCH -> DetectedSurface.YOUTUBE_SEARCH
         YouTubeSurface.YOUTUBE_VIDEO -> DetectedSurface.YOUTUBE_VIDEO
         YouTubeSurface.YOUTUBE_SHORTS -> DetectedSurface.YOUTUBE_SHORTS
+        YouTubeSurface.YOUTUBE_HOME -> DetectedSurface.YOUTUBE_HOME
+        YouTubeSurface.YOUTUBE_SUBSCRIPTIONS -> DetectedSurface.YOUTUBE_SUBSCRIPTIONS
+        YouTubeSurface.YOUTUBE_YOU -> DetectedSurface.YOUTUBE_YOU
         YouTubeSurface.YOUTUBE_OTHER -> DetectedSurface.YOUTUBE_OTHER
         YouTubeSurface.UNKNOWN -> DetectedSurface.UNKNOWN
     }
@@ -1462,6 +2360,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         private const val MAX_FIELD_LENGTH = 200
         private const val CAPTURE_THROTTLE_MS = 1_000L
         private const val DEADLINE_RETRY_MS = 1_000L
+        private const val OVERLAY_DISMISS_SETTLE_MS = 120L
+        private const val DESTINATION_NAVIGATION_SETTLE_MS = 350L
+        private const val INSTAGRAM_MAIN_FEED_SETTLE_MS = 550L
+        private const val TIKTOK_ROUTE_STEP_SETTLE_MS = 500L
+        private const val TIKTOK_INBOX_MAX_BACK_STEPS = 2
+        private const val DIRECTED_TAB_MAX_BACK_STEPS = 2
+        private const val TIKTOK_CLICK_SETTLE_MS = 250L
+        private const val NOTIFICATION_ACTION_RETRY_MS = 120L
+        private const val NOTIFICATION_ACTION_SETTLE_MS = 220L
+        private const val NOTIFICATION_ACTION_MAX_ATTEMPTS = 12
+        private const val MAX_CLICK_ANCESTOR_DEPTH = 4
         private const val OVERLAY_DELAY_MS = 3_000L
         private const val VISUAL_QA_TIMEOUT_MS = 45_000L
         private const val COLOR_SHEET = 0xFF191C1F.toInt()

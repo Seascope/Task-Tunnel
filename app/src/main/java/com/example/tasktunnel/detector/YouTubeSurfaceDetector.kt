@@ -1,12 +1,16 @@
 package com.example.tasktunnel.detector
 
 import com.example.tasktunnel.accessibility.SanitizedNode
+import com.example.tasktunnel.accessibility.UiChromeRole
 import java.util.Locale
 
 enum class YouTubeSurface {
     YOUTUBE_SHORTS,
     YOUTUBE_VIDEO,
     YOUTUBE_SEARCH,
+    YOUTUBE_HOME,
+    YOUTUBE_SUBSCRIPTIONS,
+    YOUTUBE_YOU,
     YOUTUBE_OTHER,
     UNKNOWN,
 }
@@ -22,8 +26,10 @@ data class YouTubeDetection(
  * Deterministic classifier over bounded, content-free accessibility fingerprints.
  *
  * Candidate IDs are deliberately explicit and must be verified/tuned using physical-device
- * inspector captures. Text and content descriptions are never detector inputs. Conflicting
- * specialized evidence fails open to UNKNOWN.
+ * inspector captures. Raw text and content descriptions are never retained. The sanitizer may
+ * derive one fixed navigation-role enum (Home/Shorts/Subscriptions/You) from exact YouTube chrome
+ * labels so top-level feeds can be distinguished without storing arbitrary accessibility content.
+ * Conflicting specialized evidence fails open to UNKNOWN.
  */
 object YouTubeSurfaceDetector {
     const val YOUTUBE_PACKAGE = "com.google.android.youtube"
@@ -50,6 +56,10 @@ object YouTubeSurfaceDetector {
         val videoMatches = videoIds.intersect(ids).sorted()
         val searchMatches = searchIds.intersect(ids).sorted()
         val shellMatches = shellIds.intersect(ids).sorted()
+        val selectedChromeRoles = nodes.asSequence()
+            .filter { it.visibleToUser && it.selected }
+            .mapNotNull { it.chromeRole }
+            .toSet()
         val hasPagerStructure = nodes.any {
             it.scrollable && it.childCount > 0 &&
                 (it.className?.endsWith("ViewPager2") == true || it.className?.endsWith("RecyclerView") == true)
@@ -86,6 +96,18 @@ object YouTubeSurfaceDetector {
             if (searchMatches.size >= 2) 0.9 else 0.8,
             signalList(emptyList(), emptyList(), searchMatches, false, hasEditableStructure, false),
         )
+        if (selectedChromeRoles.size > 1) {
+            return unknown(selectedChromeRoles.map { "nav:${it.name.lowercase(Locale.ROOT)}" })
+        }
+        selectedChromeRoles.singleOrNull()?.let { role ->
+            val surface = when (role) {
+                UiChromeRole.YOUTUBE_HOME -> YouTubeSurface.YOUTUBE_HOME
+                UiChromeRole.YOUTUBE_SHORTS -> YouTubeSurface.YOUTUBE_SHORTS
+                UiChromeRole.YOUTUBE_SUBSCRIPTIONS -> YouTubeSurface.YOUTUBE_SUBSCRIPTIONS
+                UiChromeRole.YOUTUBE_YOU -> YouTubeSurface.YOUTUBE_YOU
+            }
+            return result(surface, 0.85, listOf("nav:${role.name.lowercase(Locale.ROOT)}"))
+        }
         if (shellMatches.isNotEmpty() && shortsMatches.isEmpty() && videoMatches.isEmpty() && searchMatches.isEmpty()) {
             return result(YouTubeSurface.YOUTUBE_OTHER, 0.6, shellMatches.map { "id:$it" })
         }

@@ -243,11 +243,11 @@ private fun HomeSurfaceRow(surface: HomeSurfaceUsage) {
 }
 
 private fun surfaceColor(kind: HomeSurfaceKind): Color = when (kind) {
-    HomeSurfaceKind.FEED, HomeSurfaceKind.FRIENDS -> ReelsVideo
-    HomeSurfaceKind.INBOX, HomeSurfaceKind.PROFILE -> MessagesShorts
+    HomeSurfaceKind.HOME, HomeSurfaceKind.FEED, HomeSurfaceKind.FRIENDS -> ReelsVideo
+    HomeSurfaceKind.INBOX, HomeSurfaceKind.PROFILE, HomeSurfaceKind.CREATE -> MessagesShorts
     HomeSurfaceKind.REELS, HomeSurfaceKind.VIDEO -> ReelsVideo
     HomeSurfaceKind.MESSAGES, HomeSurfaceKind.SHORTS -> MessagesShorts
-    HomeSurfaceKind.EXPLORE, HomeSurfaceKind.SEARCH -> ExploreSearch
-    HomeSurfaceKind.OTHER -> Other
+    HomeSurfaceKind.EXPLORE, HomeSurfaceKind.SEARCH, HomeSurfaceKind.SUBSCRIPTIONS -> ExploreSearch
+    HomeSurfaceKind.YOU, HomeSurfaceKind.OTHER -> Other
     HomeSurfaceKind.UNCLASSIFIED -> Unclassified
 }
