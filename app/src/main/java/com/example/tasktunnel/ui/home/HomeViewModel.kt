@@ -89,6 +89,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             HomeSurfaceKind.OTHER to durationOf(DetectedSurface.YOUTUBE_OTHER),
             HomeSurfaceKind.UNCLASSIFIED to unclassifiedDurationMillis,
         )
+        AttentionApp.TIKTOK -> listOf(
+            HomeSurfaceKind.FEED to durationOf(DetectedSurface.TIKTOK_FEED),
+            HomeSurfaceKind.FRIENDS to durationOf(DetectedSurface.TIKTOK_FRIENDS),
+            HomeSurfaceKind.SEARCH to durationOf(DetectedSurface.TIKTOK_SEARCH),
+            HomeSurfaceKind.INBOX to durationOf(DetectedSurface.TIKTOK_INBOX),
+            HomeSurfaceKind.PROFILE to durationOf(DetectedSurface.TIKTOK_PROFILE),
+            HomeSurfaceKind.OTHER to durationOf(DetectedSurface.TIKTOK_OTHER),
+            HomeSurfaceKind.UNCLASSIFIED to unclassifiedDurationMillis,
+        )
         AttentionApp.REDDIT -> emptyList()
     }
 
@@ -118,7 +127,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private enum class RefreshSignal { DataChanged, Unavailable }
 
     private companion object {
-        val HOME_APPS = listOf(AttentionApp.INSTAGRAM, AttentionApp.YOUTUBE)
+        val HOME_APPS = listOf(AttentionApp.INSTAGRAM, AttentionApp.YOUTUBE, AttentionApp.TIKTOK)
         const val MIN_COMPOSITION_COVERAGE = 0.5
         const val MIN_UNCLASSIFIED_SHARE = 0.1
         const val MIN_MEANINGFUL_UNCLASSIFIED_MILLIS = 60_000L

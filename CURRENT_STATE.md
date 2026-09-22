@@ -1,5 +1,23 @@
 # Current State
 
+## TikTok T2 integration
+
+Status: implementation complete; physical validation remains pending.
+
+- TikTok 47.0.3 (versionCode 2024700030) now uses the existing semantic surface
+	detector and accessibility-based Surface Usage segment tracker. Feed, Friends,
+	Search, Inbox, Profile, and Other remain distinct classified surfaces; UNKNOWN
+	is stored as Unclassified after the existing stabilization grace.
+- Home includes TikTok only when tracked activity exists and preserves the compact
+	Today hierarchy and coverage treatment. Search-origin videos remain Search and
+	Inbox conversations remain Inbox.
+- Attention, Review, deterministic Patterns/Trends, Drift, Protection, onboarding,
+	and supported-app presentation now consume TikTok through their existing generic
+	models. Drift thresholds and Review/Pattern thresholds are unchanged.
+- No Room migration was required: app and surface values are existing string
+	fields. TikTok remains local-only and no UsageStats permission was added.
+- T2 does not add Facebook or new TikTok-specific analytics/storage systems.
+
 ## UI polish pass 5
 
 Status: implementation, debug assembly, and requested device-capture verification are complete.

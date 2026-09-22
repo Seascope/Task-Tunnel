@@ -5,6 +5,7 @@ import java.util.UUID
 enum class SupportedApp(val packageName: String, val displayName: String) {
     INSTAGRAM("com.instagram.android", "Instagram"),
     YOUTUBE("com.google.android.youtube", "YouTube"),
+    TIKTOK("com.zhiliaoapp.musically", "TikTok"),
     ;
 
     companion object {
@@ -19,6 +20,9 @@ enum class TunnelTask(val app: SupportedApp) {
     INSTAGRAM_BROWSE(SupportedApp.INSTAGRAM),
     YOUTUBE_SEARCH_WATCH(SupportedApp.YOUTUBE),
     YOUTUBE_BROWSE(SupportedApp.YOUTUBE),
+    TIKTOK_SEARCH_WATCH(SupportedApp.TIKTOK),
+    TIKTOK_INBOX(SupportedApp.TIKTOK),
+    TIKTOK_BROWSE(SupportedApp.TIKTOK),
 }
 
 enum class TunnelStatus { ACTIVE, EXPIRED }
@@ -46,6 +50,12 @@ enum class DetectedSurface {
     YOUTUBE_VIDEO,
     YOUTUBE_SHORTS,
     YOUTUBE_OTHER,
+    TIKTOK_FEED,
+    TIKTOK_FRIENDS,
+    TIKTOK_SEARCH,
+    TIKTOK_INBOX,
+    TIKTOK_PROFILE,
+    TIKTOK_OTHER,
     UNKNOWN,
 }
 
@@ -69,11 +79,23 @@ object SessionPolicy {
                 in youtubeSurfaces -> PolicyDecision.ALLOW
                 else -> PolicyDecision.UNKNOWN_FAIL_OPEN
             }
+            TunnelTask.TIKTOK_SEARCH_WATCH,
+            TunnelTask.TIKTOK_INBOX,
+            -> when (surface) {
+                DetectedSurface.TIKTOK_FEED,
+                DetectedSurface.TIKTOK_FRIENDS,
+                -> PolicyDecision.INTERVENE
+                in tikTokSurfaces -> PolicyDecision.ALLOW
+                else -> PolicyDecision.UNKNOWN_FAIL_OPEN
+            }
             TunnelTask.INSTAGRAM_BROWSE -> {
                 if (surface in instagramSurfaces) PolicyDecision.ALLOW else PolicyDecision.UNKNOWN_FAIL_OPEN
             }
             TunnelTask.YOUTUBE_BROWSE -> {
                 if (surface in youtubeSurfaces) PolicyDecision.ALLOW else PolicyDecision.UNKNOWN_FAIL_OPEN
+            }
+            TunnelTask.TIKTOK_BROWSE -> {
+                if (surface in tikTokSurfaces) PolicyDecision.ALLOW else PolicyDecision.UNKNOWN_FAIL_OPEN
             }
         }
     }
@@ -90,6 +112,14 @@ object SessionPolicy {
         DetectedSurface.YOUTUBE_VIDEO,
         DetectedSurface.YOUTUBE_SHORTS,
         DetectedSurface.YOUTUBE_OTHER,
+    )
+    private val tikTokSurfaces = setOf(
+        DetectedSurface.TIKTOK_FEED,
+        DetectedSurface.TIKTOK_FRIENDS,
+        DetectedSurface.TIKTOK_SEARCH,
+        DetectedSurface.TIKTOK_INBOX,
+        DetectedSurface.TIKTOK_PROFILE,
+        DetectedSurface.TIKTOK_OTHER,
     )
 }
 
@@ -150,6 +180,7 @@ data class TunnelRuntimeState(
     val returnCooldown: ReturnCooldown? = null,
     val checkIn: IntentionCheckInState? = null,
     val currentSurface: DetectedSurface? = null,
+    val currentSurfaceObservedAtMillis: Long? = null,
     val detourAllow: DetourAllowState? = null,
     val leftProtectedAppAtMillis: Long? = null,
 )
@@ -191,6 +222,7 @@ class TunnelCoordinator(
                 returnCooldown = null,
                 checkIn = null,
                 currentSurface = null,
+                currentSurfaceObservedAtMillis = null,
                 detourAllow = null,
                 leftProtectedAppAtMillis = null,
             )
@@ -202,6 +234,7 @@ class TunnelCoordinator(
                 returnCooldown = null,
                 checkIn = null,
                 currentSurface = null,
+                currentSurfaceObservedAtMillis = null,
                 detourAllow = null,
                 leftProtectedAppAtMillis = null,
             )
@@ -232,6 +265,7 @@ class TunnelCoordinator(
                             it.sessionId == session.id && (leftAt == null || it.kind != IntentionCheckInKind.DETOUR_RENEWAL)
                         },
                         currentSurface = state.currentSurface,
+                        currentSurfaceObservedAtMillis = state.currentSurfaceObservedAtMillis,
                         detourAllow = state.detourAllow?.takeIf { it.sessionId == session.id && leftAt == null },
                         leftProtectedAppAtMillis = null,
                     )
@@ -246,6 +280,7 @@ class TunnelCoordinator(
                 returnCooldown = null,
                 checkIn = null,
                 currentSurface = null,
+                currentSurfaceObservedAtMillis = null,
                 detourAllow = null,
                 leftProtectedAppAtMillis = state.leftProtectedAppAtMillis ?: nowMillis,
             )
@@ -278,7 +313,8 @@ class TunnelCoordinator(
             overrideScope = null,
             returnCooldown = null,
             checkIn = null,
-            currentSurface = null,
+            currentSurface = state.currentSurface,
+            currentSurfaceObservedAtMillis = state.currentSurfaceObservedAtMillis,
             detourAllow = null,
             leftProtectedAppAtMillis = null,
         )
@@ -292,9 +328,24 @@ class TunnelCoordinator(
                 ),
             )
         }
+        val currentSurface = state.currentSurface
+        val observedAt = state.currentSurfaceObservedAtMillis
+        if (currentSurface != null && observedAt != null &&
+            state.foregroundPackage == task.app.packageName &&
+            nowMillis - observedAt <= CURRENT_SURFACE_FRESHNESS_MILLIS
+        ) {
+            observeSurface(currentSurface, nowMillis)
+        }
     }
 
     fun observeSurface(surface: DetectedSurface, nowMillis: Long) {
+        val previousObservedSurface = state.currentSurface
+        if (surface != DetectedSurface.UNKNOWN) {
+            state = state.copy(
+                currentSurface = surface,
+                currentSurfaceObservedAtMillis = nowMillis,
+            )
+        }
         val session = state.activeSession?.takeIf {
             it.status == TunnelStatus.ACTIVE && it.app.packageName == state.foregroundPackage
         }
@@ -305,7 +356,7 @@ class TunnelCoordinator(
                         it.kind == IntentionCheckInKind.DETOUR_RENEWAL
                 } == true -> state.checkIn?.surface
                 state.detourAllow?.let { it.sessionId == activeSession.id } == true -> state.detourAllow?.surface
-                else -> state.currentSurface?.takeIf {
+                else -> previousObservedSurface?.takeIf {
                     it != DetectedSurface.UNKNOWN &&
                         SessionPolicy.evaluate(activeSession.task, it) == PolicyDecision.INTERVENE
                 }
@@ -353,6 +404,8 @@ class TunnelCoordinator(
             returnCooldown = cooldown,
             checkIn = clearedCheckIn,
             currentSurface = surface.takeIf { it != DetectedSurface.UNKNOWN } ?: state.currentSurface,
+            currentSurfaceObservedAtMillis = surface.takeIf { it != DetectedSurface.UNKNOWN }?.let { nowMillis }
+                ?: state.currentSurfaceObservedAtMillis,
             detourAllow = state.detourAllow?.takeIf { it.sessionId == activeSession.id && it.surface == surface },
         )
     }
@@ -474,6 +527,7 @@ class TunnelCoordinator(
             returnCooldown = null,
             checkIn = null,
             currentSurface = null,
+            currentSurfaceObservedAtMillis = null,
             detourAllow = null,
             leftProtectedAppAtMillis = null,
         )
@@ -488,6 +542,7 @@ class TunnelCoordinator(
             returnCooldown = null,
             checkIn = null,
             currentSurface = null,
+            currentSurfaceObservedAtMillis = null,
             detourAllow = null,
             leftProtectedAppAtMillis = null,
         )
@@ -575,8 +630,9 @@ class TunnelCoordinator(
         const val DEFAULT_BROWSE_CHECK_IN_INTERVAL_MILLIS = 15 * 60_000L
         const val MAX_CHECK_INS = 2
         const val MAX_ALLOW_BACKOFF_MULTIPLIER = 3
+        const val CURRENT_SURFACE_FRESHNESS_MILLIS = 5_000L
     }
 }
 
 private val TunnelTask.isOpenEndedBrowse: Boolean
-    get() = this == TunnelTask.INSTAGRAM_BROWSE || this == TunnelTask.YOUTUBE_BROWSE
+    get() = this == TunnelTask.INSTAGRAM_BROWSE || this == TunnelTask.YOUTUBE_BROWSE || this == TunnelTask.TIKTOK_BROWSE

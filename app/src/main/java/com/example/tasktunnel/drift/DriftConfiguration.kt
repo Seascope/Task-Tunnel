@@ -11,6 +11,7 @@ object DriftAppCatalog {
     val apps = listOf(
         KnownDriftApp("com.instagram.android", "Instagram"),
         KnownDriftApp("com.google.android.youtube", "YouTube"),
+        KnownDriftApp("com.zhiliaoapp.musically", "TikTok"),
         KnownDriftApp("com.reddit.frontpage", "Reddit"),
     )
     val knownPackages: Set<String> = apps.mapTo(linkedSetOf()) { it.packageName }

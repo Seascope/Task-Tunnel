@@ -156,6 +156,12 @@ class AttentionEventSemantics {
             DetectedSurface.YOUTUBE_SEARCH,
             DetectedSurface.YOUTUBE_VIDEO,
             DetectedSurface.YOUTUBE_SHORTS,
+            DetectedSurface.TIKTOK_FEED,
+            DetectedSurface.TIKTOK_FRIENDS,
+            DetectedSurface.TIKTOK_SEARCH,
+            DetectedSurface.TIKTOK_INBOX,
+            DetectedSurface.TIKTOK_PROFILE,
+            DetectedSurface.TIKTOK_OTHER,
         )
     }
 }

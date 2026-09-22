@@ -1,6 +1,7 @@
 package com.example.tasktunnel.accessibility
 
 import com.example.tasktunnel.detector.InstagramDetection
+import com.example.tasktunnel.detector.TikTokDetection
 import com.example.tasktunnel.detector.YouTubeDetection
 import com.example.tasktunnel.tunnel.TunnelRuntimeState
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +45,15 @@ data class ObservedInstagramDetection(
     val fingerprint: String,
 )
 
+data class ObservedTikTokCapture(
+    val packageName: String,
+    val capturedAtMillis: Long,
+    val versionName: String?,
+    val versionCode: Long?,
+    val detection: TikTokDetection,
+    val fingerprint: String,
+)
+
 enum class InspectionStatus { IDLE, ARMED, CAPTURED, UNSUPPORTED_APP, ROOT_UNAVAILABLE, ERROR }
 
 enum class VisualQaOverlay { PURPOSE_GATE, INTERVENTION, DRIFT_CHECK_IN, SESSION_EXPIRY }
@@ -64,6 +74,8 @@ data class AccessibilityState(
     val lastYouTubeDetection: ObservedYouTubeDetection? = null,
     val currentInstagramDetection: ObservedInstagramDetection? = null,
     val lastInstagramDetection: ObservedInstagramDetection? = null,
+    val currentTikTokCapture: ObservedTikTokCapture? = null,
+    val lastTikTokCapture: ObservedTikTokCapture? = null,
     val tunnelState: TunnelRuntimeState = TunnelRuntimeState(),
 )
 
@@ -83,7 +95,7 @@ object AccessibilityRuntime {
             it.copy(
                 inspectionArmed = armed,
                 inspectionStatus = if (armed) InspectionStatus.ARMED else InspectionStatus.IDLE,
-                inspectionDetail = if (armed) "Switch to Instagram or YouTube to capture." else null,
+                inspectionDetail = if (armed) "Switch to Instagram, YouTube, or TikTok to capture." else null,
             )
         }
         TaskTunnelAccessibilityService.current?.onInspectionArmed(armed)
@@ -93,7 +105,7 @@ object AccessibilityRuntime {
         it.copy(
             snapshot = null,
             inspectionStatus = if (it.inspectionArmed) InspectionStatus.ARMED else InspectionStatus.IDLE,
-            inspectionDetail = if (it.inspectionArmed) "Switch to Instagram or YouTube to capture." else null,
+            inspectionDetail = if (it.inspectionArmed) "Switch to Instagram, YouTube, or TikTok to capture." else null,
         )
     }
 
@@ -113,4 +125,6 @@ object AccessibilityRuntime {
     internal fun clearCurrentYouTubeDetection() = mutableState.update { it.copy(currentYouTubeDetection = null) }
 
     internal fun clearCurrentInstagramDetection() = mutableState.update { it.copy(currentInstagramDetection = null) }
+
+    internal fun clearCurrentTikTokCapture() = mutableState.update { it.copy(currentTikTokCapture = null) }
 }

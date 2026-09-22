@@ -9,6 +9,7 @@ enum class AttentionEventType { INTENT, TRANSITION, INTERVENTION, DECISION }
 enum class AttentionApp(val displayName: String) {
     INSTAGRAM("Instagram"),
     YOUTUBE("YouTube"),
+    TIKTOK("TikTok"),
     REDDIT("Reddit"),
     ;
 
@@ -16,6 +17,7 @@ enum class AttentionApp(val displayName: String) {
         fun fromPackage(packageName: String?): AttentionApp? = when (packageName) {
             SupportedApp.INSTAGRAM.packageName -> INSTAGRAM
             SupportedApp.YOUTUBE.packageName -> YOUTUBE
+            SupportedApp.TIKTOK.packageName -> TIKTOK
             "com.reddit.frontpage" -> REDDIT
             else -> null
         }
@@ -23,6 +25,7 @@ enum class AttentionApp(val displayName: String) {
         fun fromSupported(app: SupportedApp): AttentionApp = when (app) {
             SupportedApp.INSTAGRAM -> INSTAGRAM
             SupportedApp.YOUTUBE -> YOUTUBE
+            SupportedApp.TIKTOK -> TIKTOK
         }
     }
 }

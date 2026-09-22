@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import com.example.tasktunnel.accessibility.AccessibilityRuntime
 import com.example.tasktunnel.accessibility.AccessibilityState
 import com.example.tasktunnel.accessibility.ObservedInstagramDetection
+import com.example.tasktunnel.accessibility.ObservedTikTokCapture
 import com.example.tasktunnel.accessibility.ObservedYouTubeDetection
 import com.example.tasktunnel.accessibility.SanitizedNode
 import com.example.tasktunnel.accessibility.VisualQaOverlay
@@ -71,6 +72,8 @@ fun DeveloperScreen(
         item { FingerprintCopyAction("Copy sanitized YouTube fingerprint", (runtime.currentYouTubeDetection ?: runtime.lastYouTubeDetection)?.fingerprint) }
         item { val current = runtime.currentInstagramDetection; InstagramDiagnosticCard(current ?: runtime.lastInstagramDetection, current != null) }
         item { FingerprintCopyAction("Copy sanitized Instagram fingerprint", (runtime.currentInstagramDetection ?: runtime.lastInstagramDetection)?.fingerprint) }
+        item { val current = runtime.currentTikTokCapture; TikTokDiagnosticCard(current ?: runtime.lastTikTokCapture, current != null) }
+        item { FingerprintCopyAction("Copy sanitized TikTok fingerprint", (runtime.currentTikTokCapture ?: runtime.lastTikTokCapture)?.fingerprint) }
         item { Button(onClick = openInspector, enabled = runtime.connected) { Text("Open sanitized inspector") } }
         item {
             SurfaceUsageInspector(usage, { refreshUsage() }) {
@@ -179,6 +182,25 @@ private fun DetectionCard(observed: ObservedYouTubeDetection?, current: Boolean)
                 Text("Confidence: ${(observed.detection.confidence * 100).toInt()}% evidence strength")
                 Text("Package: ${observed.packageName.ifEmpty { "Unavailable" }}")
                 Text("Captured: ${formatTime(observed.capturedAtMillis)}")
+                observed.detection.strongestSignals.forEach { Text("• $it") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TikTokDiagnosticCard(observed: ObservedTikTokCapture?, current: Boolean) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(if (current) "Current TikTok evidence" else "Last observed TikTok evidence", style = MaterialTheme.typography.titleMedium)
+            if (observed == null) Text("No TikTok tree captured this service session.") else {
+                Text("Classification: Unclassified evidence only")
+                Text("Package: ${observed.packageName}")
+                Text("Version: ${observed.versionName ?: "unknown"} (code ${observed.versionCode ?: "unknown"})")
+                Text("Surface: ${observed.detection.surface.name}")
+                Text("Confidence: ${(observed.detection.confidence * 100).toInt()}% evidence strength")
+                Text("Captured: ${formatTime(observed.capturedAtMillis)}")
+                Text("Freshness: ${if (current) "current" else "last observed; navigate and wait for a fresh capture"}", style = MaterialTheme.typography.bodySmall)
                 observed.detection.strongestSignals.forEach { Text("• $it") }
             }
         }

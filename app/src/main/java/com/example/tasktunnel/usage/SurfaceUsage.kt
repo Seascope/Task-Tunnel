@@ -70,7 +70,10 @@ class SurfaceUsageRepository(private val dao: SurfaceUsageSegmentDao) {
         val start = day.timeInMillis
         val end = (day.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }.timeInMillis
         return SurfaceUsageInspectorState(
-            summaries = AttentionApp.entries.filter { it != AttentionApp.REDDIT }.map { summary(it, start, end) },
+            summaries = AttentionApp.entries.filter {
+                it == AttentionApp.INSTAGRAM || it == AttentionApp.YOUTUBE || it == AttentionApp.TIKTOK
+            }
+                .map { summary(it, start, end) },
             recentSegments = dao.getRecent(50).map(SurfaceUsageSegmentEntity::toDomain),
         )
     }

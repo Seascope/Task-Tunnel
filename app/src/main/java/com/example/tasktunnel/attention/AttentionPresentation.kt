@@ -8,6 +8,9 @@ fun taskLabel(task: TunnelTask?): String = when (task) {
     TunnelTask.INSTAGRAM_BROWSE -> "Browse intentionally"
     TunnelTask.YOUTUBE_SEARCH_WATCH -> "Search / watch something specific"
     TunnelTask.YOUTUBE_BROWSE -> "Browse intentionally"
+    TunnelTask.TIKTOK_SEARCH_WATCH -> "Search / watch something specific"
+    TunnelTask.TIKTOK_INBOX -> "Check Inbox"
+    TunnelTask.TIKTOK_BROWSE -> "Browse intentionally"
     null -> "Intentional use"
 }
 
@@ -19,6 +22,12 @@ fun surfaceLabel(surface: DetectedSurface?): String = when (surface) {
     DetectedSurface.YOUTUBE_SEARCH -> "Search"
     DetectedSurface.YOUTUBE_VIDEO -> "Video"
     DetectedSurface.YOUTUBE_SHORTS -> "Shorts"
+    DetectedSurface.TIKTOK_FEED -> "For You"
+    DetectedSurface.TIKTOK_FRIENDS -> "Friends"
+    DetectedSurface.TIKTOK_SEARCH -> "Search"
+    DetectedSurface.TIKTOK_INBOX -> "Inbox"
+    DetectedSurface.TIKTOK_PROFILE -> "Profile"
+    DetectedSurface.TIKTOK_OTHER -> "This screen"
     else -> "another screen"
 }
 
@@ -28,6 +37,9 @@ fun eventDescription(event: AttentionEvent): String = when (event.subtype) {
         TunnelTask.INSTAGRAM_BROWSE -> "Opened Instagram to browse intentionally"
         TunnelTask.YOUTUBE_SEARCH_WATCH -> "Opened YouTube to search for or watch something specific"
         TunnelTask.YOUTUBE_BROWSE -> "Opened YouTube to browse intentionally"
+        TunnelTask.TIKTOK_SEARCH_WATCH -> "Opened TikTok to search for or watch something specific"
+        TunnelTask.TIKTOK_INBOX -> "Opened TikTok to check the Inbox"
+        TunnelTask.TIKTOK_BROWSE -> "Opened TikTok to browse intentionally"
         null -> "Set an intention"
     }
     AttentionSubtype.SURFACE_ENTERED -> "Entered ${surfaceLabel(event.surface)}"

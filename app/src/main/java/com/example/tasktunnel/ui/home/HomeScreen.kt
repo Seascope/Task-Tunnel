@@ -103,7 +103,7 @@ private fun HomeLoaded(
                 Text("Nothing tracked yet.", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Use Instagram or YouTube with Protection active to see where your time went inside each app.",
+                    "Use Instagram, YouTube, or TikTok with Protection active to see where your time went inside each app.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -243,6 +243,8 @@ private fun HomeSurfaceRow(surface: HomeSurfaceUsage) {
 }
 
 private fun surfaceColor(kind: HomeSurfaceKind): Color = when (kind) {
+    HomeSurfaceKind.FEED, HomeSurfaceKind.FRIENDS -> ReelsVideo
+    HomeSurfaceKind.INBOX, HomeSurfaceKind.PROFILE -> MessagesShorts
     HomeSurfaceKind.REELS, HomeSurfaceKind.VIDEO -> ReelsVideo
     HomeSurfaceKind.MESSAGES, HomeSurfaceKind.SHORTS -> MessagesShorts
     HomeSurfaceKind.EXPLORE, HomeSurfaceKind.SEARCH -> ExploreSearch

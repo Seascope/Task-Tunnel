@@ -43,13 +43,13 @@ object ProtectionHealthEvaluator {
             )
         }
 
-        if (!input.serviceConnected) {
-            return ProtectionHealth(
-                ProtectionLevel.LIMITED,
-                "Limited protection",
-                "Task Tunnel may be restricted in the background. Some interventions may not appear.",
-                backgroundConcern = true,
-            )
+            if (!input.serviceConnected) {
+                return ProtectionHealth(
+                    ProtectionLevel.LIMITED,
+                    "Limited protection",
+                    "Task Tunnel may be restricted in the background. Some interventions may not appear.",
+                    backgroundConcern = true,
+                )
         }
 
         val compatibilityConcern = input.apps.firstOrNull {
@@ -70,7 +70,7 @@ object ProtectionHealthEvaluator {
         return ProtectionHealth(
             ProtectionLevel.ACTIVE,
             "Protection active",
-            "Task Tunnel is ready for Instagram and YouTube.",
+            "Task Tunnel is ready for Instagram, YouTube, and TikTok.",
         )
     }
 }

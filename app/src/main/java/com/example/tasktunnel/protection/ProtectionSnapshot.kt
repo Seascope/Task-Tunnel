@@ -64,6 +64,7 @@ object ProtectionSnapshotFactory {
     private val supportedApps = listOf(
         "com.instagram.android" to "Instagram",
         "com.google.android.youtube" to "YouTube",
+        "com.zhiliaoapp.musically" to "TikTok",
         "com.reddit.frontpage" to "Reddit",
     )
 
@@ -89,7 +90,7 @@ object ProtectionSnapshotFactory {
                 accessibilityEnabled = accessibilityEnabled,
                 serviceConnected = runtime.connected,
                 lastServiceActivityMillis = runtime.lastHeartbeatMillis,
-                apps = apps.take(2),
+                apps = apps.take(3),
             ),
         )
         val report = DiagnosticReport(

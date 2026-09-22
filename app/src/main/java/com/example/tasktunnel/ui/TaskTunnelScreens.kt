@@ -497,13 +497,17 @@ fun ProtectionScreen(
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("Protected apps", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
         }
-        snapshot.apps.take(2).forEachIndexed { index, app ->
+        snapshot.apps.take(3).forEachIndexed { index, app ->
             item {
                 ProtectedAppRow(
                     app,
-                    if (app.displayName == "Instagram") "Reply to messages\nBrowse intentionally" else "Search / watch something specific\nBrowse intentionally",
+                    when (app.displayName) {
+                        "Instagram" -> "Reply to messages\nBrowse intentionally"
+                        "TikTok" -> "Search / watch something specific\nCheck Inbox\nBrowse intentionally"
+                        else -> "Search / watch something specific\nBrowse intentionally"
+                    },
                 )
-                if (index == 0) RowDivider(inset = true)
+                if (index < 2) RowDivider(inset = true)
             }
         }
         item {
@@ -669,7 +673,7 @@ fun OnboardingScreen(
 private fun ValueOnboarding() {
     Text("Keep the reason you opened the app", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text(
-        "Use Instagram and YouTube for what you intended. Task Tunnel adds a calm pause when you move somewhere else.",
+        "Use Instagram, YouTube, and TikTok for what you intended. Task Tunnel adds a calm pause when you move somewhere else.",
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 14.dp),
@@ -684,7 +688,7 @@ private fun ValueOnboarding() {
 private fun HowItWorksOnboarding() {
     Text("A quiet layer over apps you already use", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text(
-        "Task Tunnel watches only supported app surfaces while protection is active. It does not replace Instagram or YouTube.",
+        "Task Tunnel watches only supported app surfaces while protection is active. It does not replace Instagram, YouTube, or TikTok.",
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 14.dp, bottom = 30.dp),
@@ -739,6 +743,8 @@ private fun ConfigureOnboarding(selected: Set<String>, setEnabled: (Boolean) -> 
     SettingsRow("Instagram", "Reply to messages\nBrowse intentionally", leading = { AppIcon("com.instagram.android", "Instagram", Modifier.size(38.dp)) })
     RowDivider(inset = true)
     SettingsRow("YouTube", "Search / watch something specific\nBrowse intentionally", leading = { AppIcon("com.google.android.youtube", "YouTube", Modifier.size(38.dp)) })
+    RowDivider(inset = true)
+    SettingsRow("TikTok", "Search / watch something specific\nCheck Inbox\nBrowse intentionally", leading = { AppIcon("com.zhiliaoapp.musically", "TikTok", Modifier.size(38.dp)) })
     Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
     SectionHeader("Optional Drift Detection", Modifier.padding(bottom = 6.dp))
     DriftConfigurationSection(selected, setEnabled, setApp)
@@ -753,7 +759,7 @@ fun DisclosureContent() {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 10.dp, bottom = 18.dp),
     )
-    DisclosureItem("What it can see", "Enough of the visible interface in supported apps to identify Messages, Reels, Explore, Search, normal videos, and Shorts.")
+    DisclosureItem("What it can see", "Enough of the visible interface in supported apps to identify supported surfaces such as Messages, Reels, Explore, Search, normal videos, Shorts, For You, Friends, Inbox, and Profile.")
     DisclosureItem("Why", "To tell when you move outside the purpose you declared and offer a choice.")
     DisclosureItem("What is stored", "Your chosen purposes, meaningful app transitions, Task Tunnel prompts, and the choices you make.")
     DisclosureItem("What is not stored", "No screenshots, private message contents, accessibility text history, usernames in Attention history, raw accessibility trees, or raw fingerprints.")

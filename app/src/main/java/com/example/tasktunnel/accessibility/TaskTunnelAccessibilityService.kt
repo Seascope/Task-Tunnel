@@ -32,7 +32,10 @@ import com.example.tasktunnel.detector.InstagramSurfaceDetector
 import com.example.tasktunnel.detector.InstagramSurface
 import com.example.tasktunnel.detector.YouTubeSurfaceDetector
 import com.example.tasktunnel.detector.YouTubeSurface
+import com.example.tasktunnel.detector.TikTokSurfaceDetector
+import com.example.tasktunnel.detector.TikTokSurface
 import com.example.tasktunnel.diagnostics.SanitizedFingerprint
+import com.example.tasktunnel.diagnostics.TikTokFingerprint
 import com.example.tasktunnel.diagnostics.YouTubeFingerprint
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.drift.DriftCoordinator
@@ -121,11 +124,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val packageName = activeRootPackage() ?: run {
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
+            AccessibilityRuntime.clearCurrentTikTokCapture()
             failOpenCurrentSurface()
             return
         }
         if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) AccessibilityRuntime.clearCurrentYouTubeDetection()
         if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
+        if (packageName != TikTokSurfaceDetector.TIKTOK_PACKAGE) AccessibilityRuntime.clearCurrentTikTokCapture()
         val nowMillis = System.currentTimeMillis()
         surfaceUsageTracker.foregroundChanged(packageName, nowMillis)
         tunnelCoordinator.observeForeground(packageName, nowMillis)
@@ -199,6 +204,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 overlayVisible = false,
                 currentYouTubeDetection = null,
                 currentInstagramDetection = null,
+                currentTikTokCapture = null,
+                lastTikTokCapture = null,
                 tunnelState = com.example.tasktunnel.tunnel.TunnelRuntimeState(),
             )
         }
@@ -208,7 +215,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         if (armed && BuildConfig.DEBUG) {
             val packageName = activeRootPackage()
             if (packageName in TARGET_PACKAGES) scheduleCapture() else AccessibilityRuntime.update {
-                it.copy(inspectionStatus = InspectionStatus.UNSUPPORTED_APP, inspectionDetail = "Inspection supports Instagram and YouTube only.")
+                it.copy(inspectionStatus = InspectionStatus.UNSUPPORTED_APP, inspectionDetail = "Inspection supports Instagram, YouTube, and TikTok.")
             }
         } else {
             val packageName = activeRootPackage()
@@ -300,6 +307,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         if (root == null) {
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
+            AccessibilityRuntime.clearCurrentTikTokCapture()
             failOpenCurrentSurface()
             AccessibilityRuntime.update {
                 if (BuildConfig.DEBUG && state.inspectionArmed) it.copy(
@@ -313,6 +321,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             recycleNode(root)
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
+            AccessibilityRuntime.clearCurrentTikTokCapture()
             failOpenCurrentSurface()
             AccessibilityRuntime.update {
                 if (BuildConfig.DEBUG && state.inspectionArmed) it.copy(
@@ -325,6 +334,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             recycleNode(root)
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
+            AccessibilityRuntime.clearCurrentTikTokCapture()
             failOpenCurrentSurface()
             return
         }
@@ -375,6 +385,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             val instagramDetection = if (packageName == InstagramSurfaceDetector.INSTAGRAM_PACKAGE) {
                 InstagramSurfaceDetector.detect(packageName, sanitizedNodes)
             } else null
+            val tikTokDetection = if (packageName == TikTokSurfaceDetector.TIKTOK_PACKAGE) {
+                TikTokSurfaceDetector.detect(packageName, sanitizedNodes)
+            } else null
             AccessibilityRuntime.update {
                 val observedYouTube = detection?.let { result ->
                     ObservedYouTubeDetection(
@@ -398,6 +411,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                         ),
                     )
                 } else null
+                val observedTikTok = if (BuildConfig.DEBUG && tikTokDetection != null && it.inspectionArmed) {
+                    val (versionName, versionCode) = installedTikTokVersion()
+                    ObservedTikTokCapture(
+                        packageName = packageName,
+                        capturedAtMillis = capturedAt,
+                        versionName = versionName,
+                        versionCode = versionCode,
+                        detection = tikTokDetection,
+                        fingerprint = TikTokFingerprint.format(snapshot, versionName, versionCode, tikTokDetection),
+                    )
+                } else null
                 it.copy(
                     inspectionStatus = if (BuildConfig.DEBUG && it.inspectionArmed) InspectionStatus.CAPTURED else it.inspectionStatus,
                     inspectionDetail = if (BuildConfig.DEBUG && it.inspectionArmed) "Last captured sanitized tree." else it.inspectionDetail,
@@ -408,6 +432,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     lastYouTubeDetection = observedYouTube ?: it.lastYouTubeDetection,
                     currentInstagramDetection = observedInstagram ?: it.currentInstagramDetection,
                     lastInstagramDetection = observedInstagram ?: it.lastInstagramDetection,
+                    currentTikTokCapture = observedTikTok ?: it.currentTikTokCapture,
+                    lastTikTokCapture = observedTikTok ?: it.lastTikTokCapture,
                 )
             }
             detection?.let {
@@ -428,11 +454,23 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
                 tunnelCoordinator.observeSurface(surface, capturedAt)
             }
+            tikTokDetection?.let {
+                val surface = it.surface.toTunnelSurface()
+                val task = tunnelCoordinator.state.activeSession
+                    ?.takeIf { session -> session.app.packageName == packageName }
+                    ?.task
+                surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
+                tunnelCoordinator.state.activeSession
+                    ?.takeIf { session -> session.status == TunnelStatus.ACTIVE && session.app.packageName == packageName }
+                    ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
+                tunnelCoordinator.observeSurface(surface, capturedAt)
+            }
             updateTunnelUi()
         } catch (_: RuntimeException) {
             while (stack.isNotEmpty()) recycleNode(stack.removeLast().node)
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
+            AccessibilityRuntime.clearCurrentTikTokCapture()
             failOpenCurrentSurface()
             AccessibilityRuntime.update {
                 if (BuildConfig.DEBUG && state.inspectionArmed) it.copy(
@@ -452,6 +490,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE ||
             packageName == InstagramSurfaceDetector.INSTAGRAM_PACKAGE ||
             (BuildConfig.DEBUG && inspectionArmed && packageName in TARGET_PACKAGES)
+
+    private fun installedTikTokVersion(): Pair<String?, Long?> = runCatching {
+        val packageInfo = packageManager.getPackageInfo(TikTokFingerprint.TIKTOK_PACKAGE, 0)
+        packageInfo.versionName to packageInfo.longVersionCode
+    }.getOrDefault(null to null)
 
     @Suppress("DEPRECATION")
     private fun recycleNode(node: AccessibilityNodeInfo) {
@@ -483,7 +526,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT,
         ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = 96 }
         try {
-            getSystemService(WindowManager::class.java).addView(layout, params)
             testOverlayView = layout
             AccessibilityRuntime.update { it.copy(overlayVisible = true) }
         } catch (_: RuntimeException) {
@@ -696,6 +738,22 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     startTunnel(TunnelTask.YOUTUBE_BROWSE, selectedDurationMillis)
                 })
             }
+            SupportedApp.TIKTOK -> {
+                addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    startTunnel(TunnelTask.TIKTOK_SEARCH_WATCH, selectedDurationMillis)
+                })
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_message, "Check Inbox", "Check messages and notifications") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    startTunnel(TunnelTask.TIKTOK_INBOX, selectedDurationMillis)
+                })
+                addView(overlayDivider())
+                addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
+                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    startTunnel(TunnelTask.TIKTOK_BROWSE, selectedDurationMillis)
+                })
+            }
         }
         lateinit var timeLimitRow: View
         timeLimitRow = purposeTimeLimitRow(durationValue) {
@@ -897,8 +955,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         InterventionVariant.INTENT_RECALL -> when (prompt.task) {
             TunnelTask.INSTAGRAM_MESSAGES -> "Still here to reply?"
             TunnelTask.YOUTUBE_SEARCH_WATCH -> "Still here for something specific?"
+            TunnelTask.TIKTOK_SEARCH_WATCH -> "Still here for something specific?"
+            TunnelTask.TIKTOK_INBOX -> "Still here to check your Inbox?"
             TunnelTask.INSTAGRAM_BROWSE,
             TunnelTask.YOUTUBE_BROWSE,
+            TunnelTask.TIKTOK_BROWSE,
             -> "$surface isn't part of this Tunnel"
         }
         InterventionVariant.DIRECT,
@@ -916,8 +977,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 "You opened Instagram to reply to messages. $surface is outside that purpose."
             TunnelTask.YOUTUBE_SEARCH_WATCH ->
                 "You opened YouTube to search for or watch something. $surface is outside that purpose."
+            TunnelTask.TIKTOK_SEARCH_WATCH ->
+                "You opened TikTok to search for or watch something. $surface is outside that purpose."
+            TunnelTask.TIKTOK_INBOX ->
+                "You opened TikTok to check your Inbox. $surface is outside that purpose."
             TunnelTask.INSTAGRAM_BROWSE,
             TunnelTask.YOUTUBE_BROWSE,
+            TunnelTask.TIKTOK_BROWSE,
             -> taskReminder(prompt.task)
         }
         InterventionVariant.DIRECT,
@@ -1307,6 +1373,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         TunnelTask.INSTAGRAM_BROWSE -> "You came here to browse intentionally."
         TunnelTask.YOUTUBE_SEARCH_WATCH -> "You came here to search for or watch something."
         TunnelTask.YOUTUBE_BROWSE -> "You came here to browse intentionally."
+        TunnelTask.TIKTOK_SEARCH_WATCH -> "You came here to search for or watch something."
+        TunnelTask.TIKTOK_INBOX -> "You came here to check your Inbox."
+        TunnelTask.TIKTOK_BROWSE -> "You came here to browse intentionally."
     }
 
     private fun returnLabel(task: TunnelTask): String = when (task) {
@@ -1314,7 +1383,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         TunnelTask.YOUTUBE_SEARCH_WATCH -> "Return to Search / video"
         TunnelTask.INSTAGRAM_BROWSE,
         TunnelTask.YOUTUBE_BROWSE,
+        TunnelTask.TIKTOK_BROWSE,
         -> "Return"
+        TunnelTask.TIKTOK_SEARCH_WATCH -> "Return to Search"
+        TunnelTask.TIKTOK_INBOX -> "Return to Inbox"
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -1335,6 +1407,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         DetectedSurface.INSTAGRAM_REELS -> "Reels"
         DetectedSurface.INSTAGRAM_EXPLORE -> "Explore"
         DetectedSurface.YOUTUBE_SHORTS -> "Shorts"
+        DetectedSurface.TIKTOK_FEED -> "For You"
+        DetectedSurface.TIKTOK_FRIENDS -> "Friends"
+        DetectedSurface.TIKTOK_SEARCH -> "Search"
+        DetectedSurface.TIKTOK_INBOX -> "Inbox"
+        DetectedSurface.TIKTOK_PROFILE -> "Profile"
+        DetectedSurface.TIKTOK_OTHER -> "This screen"
         else -> "This screen"
     }
 
@@ -1355,6 +1433,16 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         YouTubeSurface.UNKNOWN -> DetectedSurface.UNKNOWN
     }
 
+    private fun TikTokSurface.toTunnelSurface(): DetectedSurface = when (this) {
+        TikTokSurface.TIKTOK_FEED -> DetectedSurface.TIKTOK_FEED
+        TikTokSurface.TIKTOK_FRIENDS -> DetectedSurface.TIKTOK_FRIENDS
+        TikTokSurface.TIKTOK_SEARCH -> DetectedSurface.TIKTOK_SEARCH
+        TikTokSurface.TIKTOK_INBOX -> DetectedSurface.TIKTOK_INBOX
+        TikTokSurface.TIKTOK_PROFILE -> DetectedSurface.TIKTOK_PROFILE
+        TikTokSurface.TIKTOK_OTHER -> DetectedSurface.TIKTOK_OTHER
+        TikTokSurface.UNKNOWN -> DetectedSurface.UNKNOWN
+    }
+
     private fun eventTypeName(type: Int) = when (type) {
         AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "Window state changed"
         AccessibilityEvent.TYPE_WINDOWS_CHANGED -> "Windows changed"
@@ -1363,7 +1451,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     companion object {
         internal var current: TaskTunnelAccessibilityService? = null
-        private val TARGET_PACKAGES = setOf(InstagramSurfaceDetector.INSTAGRAM_PACKAGE, YouTubeSurfaceDetector.YOUTUBE_PACKAGE)
+        private val TARGET_PACKAGES = setOf(
+            InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
+            YouTubeSurfaceDetector.YOUTUBE_PACKAGE,
+            TikTokFingerprint.TIKTOK_PACKAGE,
+        )
         private const val MAX_NODES = 200
         private const val MAX_DEPTH = 12
         private const val MAX_HISTORY = 8

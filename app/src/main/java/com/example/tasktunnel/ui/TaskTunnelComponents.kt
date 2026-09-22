@@ -52,6 +52,7 @@ import com.example.tasktunnel.ui.theme.HealthyGreen
 import com.example.tasktunnel.ui.theme.InstagramFallback
 import com.example.tasktunnel.ui.theme.LimitedAmber
 import com.example.tasktunnel.ui.theme.RedditFallback
+import com.example.tasktunnel.ui.theme.TikTokFallback
 import com.example.tasktunnel.ui.theme.TaskTunnelTokens
 import com.example.tasktunnel.ui.theme.YouTubeFallback
 import java.text.DateFormat
@@ -113,6 +114,7 @@ fun AppIcon(packageName: String, displayName: String, modifier: Modifier = Modif
         val fallback = when (packageName) {
             "com.instagram.android" -> InstagramFallback
             "com.google.android.youtube" -> YouTubeFallback
+            "com.zhiliaoapp.musically" -> TikTokFallback
             "com.reddit.frontpage" -> RedditFallback
             else -> MaterialTheme.colorScheme.primary
         }
@@ -274,6 +276,7 @@ val AttentionApp.packageName: String
     get() = when (this) {
         AttentionApp.INSTAGRAM -> "com.instagram.android"
         AttentionApp.YOUTUBE -> "com.google.android.youtube"
+        AttentionApp.TIKTOK -> "com.zhiliaoapp.musically"
         AttentionApp.REDDIT -> "com.reddit.frontpage"
     }
 
