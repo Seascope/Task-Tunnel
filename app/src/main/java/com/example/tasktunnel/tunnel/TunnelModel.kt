@@ -54,7 +54,9 @@ enum class DetectedSurface {
     INSTAGRAM_OTHER,
     YOUTUBE_SEARCH,
     YOUTUBE_VIDEO,
+    YOUTUBE_UNSUBSCRIBED_VIDEO,
     YOUTUBE_SHORTS,
+    YOUTUBE_UNSUBSCRIBED_SHORTS,
     YOUTUBE_HOME,
     YOUTUBE_SUBSCRIPTIONS,
     YOUTUBE_YOU,
@@ -111,7 +113,11 @@ object SessionPolicy {
             TunnelTask.YOUTUBE_SUBSCRIPTIONS -> when (surface) {
                 DetectedSurface.YOUTUBE_SUBSCRIPTIONS,
                 DetectedSurface.YOUTUBE_VIDEO,
+                DetectedSurface.YOUTUBE_SHORTS,
                 -> PolicyDecision.ALLOW
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
+                -> PolicyDecision.INTERVENE
                 in youtubeSurfaces -> PolicyDecision.INTERVENE
                 else -> PolicyDecision.UNKNOWN_FAIL_OPEN
             }
@@ -159,7 +165,9 @@ object SessionPolicy {
     private val youtubeSurfaces = setOf(
         DetectedSurface.YOUTUBE_SEARCH,
         DetectedSurface.YOUTUBE_VIDEO,
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
         DetectedSurface.YOUTUBE_SHORTS,
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
         DetectedSurface.YOUTUBE_HOME,
         DetectedSurface.YOUTUBE_SUBSCRIPTIONS,
         DetectedSurface.YOUTUBE_YOU,

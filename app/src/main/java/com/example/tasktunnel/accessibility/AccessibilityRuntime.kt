@@ -13,6 +13,17 @@ enum class UiChromeRole {
     YOUTUBE_SHORTS,
     YOUTUBE_SUBSCRIPTIONS,
     YOUTUBE_YOU,
+    /** Exact, content-free YouTube back/navigation-up affordance. */
+    YOUTUBE_BACK,
+}
+
+/**
+ * Content-free semantic state derived from YouTube's Subscribe/Subscribed accessibility control.
+ * Raw channel names or arbitrary labels are never retained.
+ */
+enum class YouTubeSubscriptionState {
+    SUBSCRIBED,
+    NOT_SUBSCRIBED,
 }
 
 data class SanitizedNode(
@@ -28,6 +39,12 @@ data class SanitizedNode(
     val selected: Boolean = false,
     val parentIndex: Int? = null,
     val chromeRole: UiChromeRole? = null,
+    /** Exact YouTube Subscribe/Subscribed semantic state; raw labels are discarded. */
+    val youtubeSubscriptionState: YouTubeSubscriptionState? = null,
+    /** Visible node top edge relative to the active app window; content-free structural evidence only. */
+    val visibleTopFraction: Double? = null,
+    /** Visible node height relative to the active app window; content-free structural evidence only. */
+    val visibleHeightFraction: Double? = null,
 )
 
 data class TreeSnapshot(

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -88,11 +89,35 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private var shownTunnelPrompt: TunnelPrompt? = null
     private var instagramDirectedNavigationInProgress = false
     private var youTubeDirectedNavigationInProgress = false
+    /**
+     * YouTube keeps the previously selected bottom tab highlighted while Search is layered on top.
+     * This bounded, content-free context lets the detector distinguish Search results from the
+     * originating tab without retaining the user's query. It clears when a top-level YouTube tab
+     * is actually selected again.
+     */
+    private var youTubeSearchContextActive = false
+    /**
+     * A YouTube click can briefly leave the previous watch-page accessibility nodes alive while
+     * the next video is loading. When a subscriptions tunnel is active, take two bounded settled
+     * re-captures so creator subscription state is read from the new video, not the old one.
+     */
+    private var youTubeSubscriptionProbeAttemptsRemaining = 0
+    private var youTubeSubscriptionProbePending = false
     private var tikTokDirectedNavigationInProgress = false
     private var lastCaptureAtElapsed = 0L
     private var lastTargetPackage: String? = null
     private val showOverlay = Runnable { showTestOverlayNow() }
     private val trailingCapture = Runnable { captureCurrentRoot() }
+    private val youTubeSubscriptionProbe = Runnable {
+        youTubeSubscriptionProbePending = false
+        val session = tunnelCoordinator.state.activeSession
+        if (session?.task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
+            session.app.packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE &&
+            activeRootPackage() == YouTubeSurfaceDetector.YOUTUBE_PACKAGE
+        ) {
+            captureCurrentRoot()
+        }
+    }
     private val tunnelDeadline = object : Runnable {
         override fun run() {
             val nowMillis = System.currentTimeMillis()
@@ -143,7 +168,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             failOpenCurrentSurface()
             return
         }
-        if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) AccessibilityRuntime.clearCurrentYouTubeDetection()
+        if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
+            AccessibilityRuntime.clearCurrentYouTubeDetection()
+            youTubeSearchContextActive = false
+            clearYouTubeSubscriptionProbe()
+        }
         if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
         if (packageName != TikTokSurfaceDetector.TIKTOK_PACKAGE) AccessibilityRuntime.clearCurrentTikTokCapture()
         val nowMillis = System.currentTimeMillis()
@@ -155,7 +184,29 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             activeTunnel = tunnelCoordinator.state.activeSession != null,
         )
         updateTunnelUi()
+        val activeSession = tunnelCoordinator.state.activeSession
+        if (packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE &&
+            activeSession?.task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
+            activeSession.app.packageName == packageName &&
+            (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED)
+        ) {
+            // A new watch surface can retain stale accessibility nodes for a short moment.
+            // Start the settled probe immediately from the navigation event itself. Previously
+            // we waited for the first capture to already classify as Video/Shorts; a transitional
+            // UNKNOWN/tab capture could therefore prevent the verification pass entirely.
+            youTubeSubscriptionProbeAttemptsRemaining = YOUTUBE_SUBSCRIPTION_PROBE_ATTEMPTS
+            scheduleYouTubeSubscriptionProbeIfNeeded()
+        }
         if (!isWindowEvent) {
+            if (
+                packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE &&
+                event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+                eventTargetsYouTubeTopLevelNavigation(event)
+            ) {
+                youTubeSearchContextActive = false
+            }
             if (shouldCapture(packageName, state.inspectionArmed)) {
                 val settleDelay = if (
                     event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
@@ -200,6 +251,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun tearDownRuntime() {
+        youTubeSearchContextActive = false
+        clearYouTubeSubscriptionProbe()
         handler.removeCallbacks(showOverlay)
         handler.removeCallbacks(trailingCapture)
         handler.removeCallbacks(tunnelDeadline)
@@ -427,6 +480,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val stack = ArrayDeque<PendingNode>()
         try {
             val nodes = ArrayList<SanitizedNode>(MAX_NODES)
+            val rootBounds = Rect().also { bounds ->
+                try { root.getBoundsInScreen(bounds) } catch (_: RuntimeException) { bounds.setEmpty() }
+            }
+            val activeWindowHeight = rootBounds.height().takeIf { it > 0 }
             stack.addLast(PendingNode(root, 0, null))
             var truncated = false
             while (stack.isNotEmpty()) {
@@ -434,6 +491,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 if (nodes.size >= MAX_NODES) { recycleNode(node); truncated = true; break }
                 try {
                     val nodeIndex = nodes.size
+                    val bounds = Rect()
+                    val hasBounds = try {
+                        node.getBoundsInScreen(bounds)
+                        !bounds.isEmpty
+                    } catch (_: RuntimeException) { false }
+                    val visibleTopFraction = if (hasBounds && activeWindowHeight != null) {
+                        ((bounds.top - rootBounds.top).toDouble() / activeWindowHeight.toDouble()).coerceIn(0.0, 1.0)
+                    } else null
+                    val visibleHeightFraction = if (hasBounds && activeWindowHeight != null && bounds.height() > 0) {
+                        (bounds.height().toDouble() / activeWindowHeight.toDouble()).coerceIn(0.0, 1.0)
+                    } else null
                     nodes += SanitizedNode(
                         depth = depth,
                         className = node.className?.toString()?.take(MAX_FIELD_LENGTH),
@@ -447,6 +515,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                         selected = node.isSelected || inferWhitelistedChromeSelected(packageName, node),
                         parentIndex = parentIndex,
                         chromeRole = inferWhitelistedChromeRole(packageName, node),
+                        youtubeSubscriptionState = inferWhitelistedYouTubeSubscriptionState(packageName, node),
+                        visibleTopFraction = visibleTopFraction,
+                        visibleHeightFraction = visibleHeightFraction,
                     )
                     if (depth < MAX_DEPTH) {
                         val remainingCapacity = MAX_NODES - nodes.size - stack.size
@@ -465,7 +536,22 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             val sanitizedNodes = nodes.toList()
             val snapshot = TreeSnapshot(packageName, capturedAt, sanitizedNodes, truncated)
             val detection = if (packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
-                YouTubeSurfaceDetector.detect(packageName, sanitizedNodes)
+                YouTubeSurfaceDetector.detect(
+                    packageName = packageName,
+                    nodes = sanitizedNodes,
+                    searchContextActive = youTubeSearchContextActive,
+                ).also { result ->
+                    when (result.surface) {
+                        YouTubeSurface.YOUTUBE_SEARCH -> youTubeSearchContextActive = true
+                        YouTubeSurface.YOUTUBE_HOME,
+                        YouTubeSurface.YOUTUBE_SUBSCRIPTIONS,
+                        YouTubeSurface.YOUTUBE_YOU,
+                        -> youTubeSearchContextActive = false
+                        // Keep the context through a video opened from Search so Back can return
+                        // to Search results even if YouTube still highlights the old source tab.
+                        else -> Unit
+                    }
+                }
             } else null
             val instagramDetection = if (packageName == InstagramSurfaceDetector.INSTAGRAM_PACKAGE) {
                 InstagramSurfaceDetector.detect(packageName, sanitizedNodes)
@@ -523,13 +609,23 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             }
             detection?.let {
                 if (youTubeDirectedNavigationInProgress) return@let
+                val task = tunnelCoordinator.state.activeSession
+                    ?.takeIf { session -> session.app.packageName == packageName }
+                    ?.task
                 val surface = it.surface.toTunnelSurface()
-                val task = tunnelCoordinator.state.activeSession?.takeIf { session -> session.app.packageName == packageName }?.task
+                val policySurface = it.toPolicyTunnelSurface(task)
+                if (task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
+                    (it.surface == YouTubeSurface.YOUTUBE_VIDEO || it.surface == YouTubeSurface.YOUTUBE_SHORTS)
+                ) {
+                    scheduleYouTubeSubscriptionProbeIfNeeded()
+                } else if (task != TunnelTask.YOUTUBE_SUBSCRIPTIONS) {
+                    clearYouTubeSubscriptionProbe()
+                }
                 surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
                 tunnelCoordinator.state.activeSession
                     ?.takeIf { session -> session.status == TunnelStatus.ACTIVE && session.app.packageName == packageName }
                     ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
-                tunnelCoordinator.observeSurface(surface, capturedAt)
+                tunnelCoordinator.observeSurface(policySurface, capturedAt)
             }
             instagramDetection?.let {
                 if (instagramDirectedNavigationInProgress) return@let
@@ -573,6 +669,30 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun eventTargetsYouTubeTopLevelNavigation(event: AccessibilityEvent): Boolean {
+        var node = try { event.source } catch (_: RuntimeException) { null } ?: return false
+        var ownsNode = true
+        return try {
+            repeat(4) {
+                val role = inferWhitelistedChromeRole(YouTubeSurfaceDetector.YOUTUBE_PACKAGE, node)
+                if (role == UiChromeRole.YOUTUBE_HOME ||
+                    role == UiChromeRole.YOUTUBE_SHORTS ||
+                    role == UiChromeRole.YOUTUBE_SUBSCRIPTIONS ||
+                    role == UiChromeRole.YOUTUBE_YOU
+                ) {
+                    return true
+                }
+                val parent = try { node.parent } catch (_: RuntimeException) { null } ?: return false
+                if (ownsNode) recycleNode(node)
+                node = parent
+                ownsNode = true
+            }
+            false
+        } finally {
+            if (ownsNode) recycleNode(node)
+        }
+    }
+
     private fun inferWhitelistedChromeRole(
         packageName: String,
         node: AccessibilityNodeInfo,
@@ -581,15 +701,16 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val visible = try { node.isVisibleToUser && node.isEnabled } catch (_: RuntimeException) { false }
         if (!visible) return null
         val className = try { node.className?.toString() } catch (_: RuntimeException) { null }
-        if (className?.endsWith("Button") != true) return null
 
-        // Only derive one of four fixed navigation roles. Raw text/content descriptions are never
-        // stored in the sanitized snapshot, fingerprint, database, or Attention history.
+        // Only derive fixed YouTube chrome roles. Raw text/content descriptions are never stored
+        // in the sanitized snapshot, fingerprint, database, or Attention history.
         val labels = buildList {
             try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
             try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
         }
         fun matches(label: String) = labels.any { it == label || it.startsWith("$label,") }
+        if (matches("Back") || matches("Navigate up")) return UiChromeRole.YOUTUBE_BACK
+        if (className?.endsWith("Button") != true) return null
         return when {
             matches("Home") -> UiChromeRole.YOUTUBE_HOME
             matches("Shorts") -> UiChromeRole.YOUTUBE_SHORTS
@@ -610,11 +731,85 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             UiChromeRole.YOUTUBE_SHORTS -> "shorts"
             UiChromeRole.YOUTUBE_SUBSCRIPTIONS -> "subscriptions"
             UiChromeRole.YOUTUBE_YOU -> "you"
+            UiChromeRole.YOUTUBE_BACK -> return false
         }
         return buildList {
             try { node.text?.toString()?.trim()?.lowercase(java.util.Locale.ROOT)?.let(::add) } catch (_: RuntimeException) { }
             try { node.contentDescription?.toString()?.trim()?.lowercase(java.util.Locale.ROOT)?.let(::add) } catch (_: RuntimeException) { }
         }.any { it.startsWith(roleLabel) && "selected" in it }
+    }
+
+    /**
+     * Derive only the fixed Subscribe/Subscribed state from YouTube accessibility labels.
+     * Channel names and the raw labels are intentionally discarded at capture time.
+     * Conflicting states later fail open in the detector.
+     */
+    private fun inferWhitelistedYouTubeSubscriptionState(
+        packageName: String,
+        node: AccessibilityNodeInfo,
+    ): YouTubeSubscriptionState? {
+        if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) return null
+        val interactive = try {
+            node.isClickable || node.className?.toString()?.endsWith("Button") == true
+        } catch (_: RuntimeException) {
+            false
+        }
+        val subscribeLikeId = try {
+            node.viewIdResourceName?.substringAfterLast('/')?.lowercase(java.util.Locale.ROOT)?.contains("subscribe") == true
+        } catch (_: RuntimeException) {
+            false
+        }
+
+        val labels = buildList {
+            try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+            try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                try { node.stateDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+            }
+        }
+        fun exactSubscribed(label: String) = label.equals("Subscribed", ignoreCase = true)
+        fun exactSubscribe(label: String) = label.equals("Subscribe", ignoreCase = true)
+        fun exactUnsubscribe(label: String) = label.equals("Unsubscribe", ignoreCase = true)
+        fun subscribedAction(label: String): Boolean {
+            val normalized = label.trim()
+            return normalized.startsWith("Subscribed,", ignoreCase = true) ||
+                normalized.startsWith("Subscribed ", ignoreCase = true) ||
+                normalized.startsWith("Unsubscribe,", ignoreCase = true) ||
+                normalized.startsWith("Unsubscribe ", ignoreCase = true)
+        }
+        fun subscribeAction(label: String): Boolean {
+            val normalized = label.trim()
+            return normalized.startsWith("Subscribe,", ignoreCase = true) ||
+                normalized.startsWith("Subscribe ", ignoreCase = true)
+        }
+        fun notificationSettingsForSubscribedChannel(label: String): Boolean {
+            val normalized = label.trim().lowercase(java.util.Locale.ROOT)
+            return normalized.startsWith("current setting is ") &&
+                "notification" in normalized &&
+                " for " in normalized
+        }
+
+        return when {
+            labels.any(::exactSubscribed) || labels.any(::exactUnsubscribe) -> YouTubeSubscriptionState.SUBSCRIBED
+            labels.any(::exactSubscribe) -> YouTubeSubscriptionState.NOT_SUBSCRIBED
+            (interactive || subscribeLikeId) && labels.any(::subscribedAction) -> YouTubeSubscriptionState.SUBSCRIBED
+            (interactive || subscribeLikeId) && labels.any(::subscribeAction) -> YouTubeSubscriptionState.NOT_SUBSCRIBED
+            interactive && labels.any(::notificationSettingsForSubscribedChannel) -> YouTubeSubscriptionState.SUBSCRIBED
+            else -> null
+        }
+    }
+
+    private fun scheduleYouTubeSubscriptionProbeIfNeeded() {
+        if (youTubeSubscriptionProbeAttemptsRemaining <= 0 || youTubeSubscriptionProbePending) return
+        youTubeSubscriptionProbeAttemptsRemaining -= 1
+        youTubeSubscriptionProbePending = true
+        handler.postDelayed(youTubeSubscriptionProbe, YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS)
+    }
+
+    private fun clearYouTubeSubscriptionProbe() {
+        youTubeSubscriptionProbeAttemptsRemaining = 0
+        youTubeSubscriptionProbePending = false
+        handler.removeCallbacks(youTubeSubscriptionProbe)
     }
 
     private fun activeRootPackage(): String? {
@@ -1014,7 +1209,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             })
         }
 
-        val allowLabel = "Allow $surface for now"
+        val allowLabel = when (prompt.surface) {
+            DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
+            DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
+            -> "Keep watching for now"
+            else -> "Allow $surface for now"
+        }
         val allowAction = {
             val session = tunnelCoordinator.state.activeSession?.takeIf {
                 it.id == prompt.sessionId && tunnelCoordinator.state.prompt == prompt
@@ -1164,7 +1364,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         prompt: TunnelPrompt.Intervention,
         surface: String,
         variant: InterventionVariant,
-    ): String = when (variant) {
+    ): String {
+        if (prompt.task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
+            prompt.surface in setOf(
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
+            )
+        ) return "This creator isn't in your subscriptions"
+        return when (variant) {
         InterventionVariant.INTENT_RECALL -> when (prompt.task) {
             TunnelTask.INSTAGRAM_MESSAGES -> "Still here to reply?"
             TunnelTask.INSTAGRAM_SEARCH -> "Still looking for something specific?"
@@ -1182,13 +1389,24 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         InterventionVariant.DIRECT,
         InterventionVariant.SHORT_PAUSE,
         -> "$surface isn't part of this Tunnel"
+        }
     }
 
     private fun interventionReminder(
         prompt: TunnelPrompt.Intervention,
         surface: String,
         variant: InterventionVariant,
-    ): String = when (variant) {
+    ): String {
+        if (prompt.task == TunnelTask.YOUTUBE_SUBSCRIPTIONS) {
+            when (prompt.surface) {
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO ->
+                    return "You came here to check subscriptions. This video is from a channel you don't subscribe to."
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS ->
+                    return "You came here to check subscriptions. This Short is from a channel you don't subscribe to."
+                else -> Unit
+            }
+        }
+        return when (variant) {
         InterventionVariant.INTENT_RECALL -> when (prompt.task) {
             TunnelTask.INSTAGRAM_MESSAGES ->
                 "You opened Instagram to reply to messages. $surface is outside that purpose."
@@ -1214,6 +1432,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         InterventionVariant.DIRECT,
         InterventionVariant.SHORT_PAUSE,
         -> taskReminder(prompt.task)
+        }
     }
 
     private fun sessionExpiredView(prompt: TunnelPrompt.SessionExpired) = baseTunnelOverlay().apply {
@@ -1514,6 +1733,29 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun navigateToYouTubeDestination(task: TunnelTask) {
         youTubeDirectedNavigationInProgress = true
+
+        // Subscriptions needs stronger destination semantics than the other YouTube tabs.
+        // YouTube keeps the source bottom tab selected while a nested Search/Video screen is
+        // open, so clicking an already-selected Subscriptions tab can return ACTION_CLICK=true
+        // without leaving the video at all. Only consider this route complete once the detector
+        // confirms that the actual Subscriptions feed is visible.
+        if (task == TunnelTask.YOUTUBE_SUBSCRIPTIONS) {
+            // YouTube keeps the originating bottom tab selected under nested watch/search screens.
+            // Do not infer a route from that selected tab. Prefer YouTube's own exported
+            // "open subscriptions" destination, which asks the app to open the feed root directly.
+            if (openYouTubeSubscriptionsDestination()) {
+                youTubeSearchContextActive = false
+                handler.postDelayed({
+                    youTubeDirectedNavigationInProgress = false
+                    handler.removeCallbacks(trailingCapture)
+                    captureCurrentRoot()
+                }, YOUTUBE_SUBSCRIPTIONS_DESTINATION_SETTLE_MS)
+            } else {
+                navigateToYouTubeSubscriptionsRoot(DIRECTED_TAB_MAX_BACK_STEPS)
+            }
+            return
+        }
+
         if (navigateToTaskDestination(task)) {
             finishYouTubeDirectedNavigationAfterSettle()
             return
@@ -1527,6 +1769,83 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         } else {
             failYouTubeDirectedNavigation()
         }
+    }
+
+    private fun openYouTubeSubscriptionsDestination(): Boolean {
+        val shortcutIntent = Intent(YOUTUBE_OPEN_SUBSCRIPTIONS_ACTION).apply {
+            setPackage(YouTubeSurfaceDetector.YOUTUBE_PACKAGE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (runCatching { startActivity(shortcutIntent); true }.getOrDefault(false)) return true
+
+        // Older/variant YouTube builds may not expose the shortcut action. The canonical web
+        // subscriptions route is a secondary explicit destination before falling back to UI taps.
+        val feedIntent = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse(YOUTUBE_SUBSCRIPTIONS_FEED_URI),
+        ).apply {
+            setPackage(YouTubeSurfaceDetector.YOUTUBE_PACKAGE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching { startActivity(feedIntent); true }.getOrDefault(false)
+    }
+
+    private fun navigateToYouTubeSubscriptionsRoot(backStepsRemaining: Int) {
+        // Refresh first: the cached detection may still describe the surface that was visible
+        // before the Purpose Gate / notification action was dismissed. captureCurrentRoot() is
+        // safe here because directed navigation suppresses coordinator policy while still
+        // updating currentYouTubeDetection.
+        captureCurrentRoot()
+        when (AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface) {
+            YouTubeSurface.YOUTUBE_SUBSCRIPTIONS -> {
+                // A watch/search layer can still be on top while Subscriptions remains selected.
+                // Only accept this as the feed root when there is no nested Back/up chrome.
+                if (!hasYouTubeBackNavigationChrome()) {
+                    finishYouTubeDirectedNavigationAfterSettle()
+                    return
+                }
+                if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
+                    failYouTubeDirectedNavigation()
+                    return
+                }
+                handler.postDelayed(
+                    { navigateToYouTubeSubscriptionsRoot(backStepsRemaining - 1) },
+                    DESTINATION_NAVIGATION_SETTLE_MS,
+                )
+                return
+            }
+            YouTubeSurface.YOUTUBE_SEARCH,
+            YouTubeSurface.YOUTUBE_VIDEO,
+            -> {
+                if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
+                    failYouTubeDirectedNavigation()
+                    return
+                }
+                handler.postDelayed(
+                    { navigateToYouTubeSubscriptionsRoot(backStepsRemaining - 1) },
+                    DESTINATION_NAVIGATION_SETTLE_MS,
+                )
+                return
+            }
+            else -> Unit
+        }
+
+        // We are on a top-level/other YouTube surface. Click Subscriptions, but do not trust the
+        // click result as proof of navigation. Verify the resulting content surface after settle.
+        if (!clickYouTubeSubscriptionsAffordance()) {
+            failYouTubeDirectedNavigation()
+            return
+        }
+        handler.postDelayed({
+            captureCurrentRoot()
+            when (AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface) {
+                YouTubeSurface.YOUTUBE_SUBSCRIPTIONS -> finishYouTubeDirectedNavigationAfterSettle()
+                YouTubeSurface.YOUTUBE_SEARCH,
+                YouTubeSurface.YOUTUBE_VIDEO,
+                -> navigateToYouTubeSubscriptionsRoot(backStepsRemaining)
+                else -> failYouTubeDirectedNavigation()
+            }
+        }, DESTINATION_NAVIGATION_SETTLE_MS)
     }
 
     private fun currentYouTubeSurfaceAllowsBackNavigation(): Boolean =
@@ -1553,6 +1872,44 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 backTowardYouTubeMainShell(task, backStepsRemaining - 1)
             }
         }, DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun hasYouTubeBackNavigationChrome(): Boolean {
+        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
+        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
+        if (rootPackage != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
+            recycleNode(root)
+            return false
+        }
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        return try {
+            stack.addLast(root)
+            while (stack.isNotEmpty()) {
+                val node = stack.removeLast()
+                val ownsNode = node !== root
+                try {
+                    if (inferWhitelistedChromeRole(YouTubeSurfaceDetector.YOUTUBE_PACKAGE, node) ==
+                        UiChromeRole.YOUTUBE_BACK
+                    ) {
+                        while (stack.isNotEmpty()) {
+                            val pending = stack.removeLast()
+                            if (pending !== root) recycleNode(pending)
+                        }
+                        return true
+                    }
+                    for (index in node.childCount - 1 downTo 0) node.getChild(index)?.let(stack::addLast)
+                } finally {
+                    if (ownsNode) recycleNode(node)
+                }
+            }
+            false
+        } finally {
+            while (stack.isNotEmpty()) {
+                val pending = stack.removeLast()
+                if (pending !== root) recycleNode(pending)
+            }
+            recycleNode(root)
+        }
     }
 
     private fun hasYouTubeTopLevelChrome(): Boolean {
@@ -1611,11 +1968,15 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         captureCurrentRoot()
     }
 
-    private fun clickYouTubeSearchAffordance(): Boolean = clickAppAffordance(
-        packageName = YouTubeSurfaceDetector.YOUTUBE_PACKAGE,
-        contentDescriptions = setOf("Search"),
-        textLabels = setOf("Search"),
-    )
+    private fun clickYouTubeSearchAffordance(): Boolean {
+        val clicked = clickAppAffordance(
+            packageName = YouTubeSurfaceDetector.YOUTUBE_PACKAGE,
+            contentDescriptions = setOf("Search"),
+            textLabels = setOf("Search"),
+        )
+        if (clicked) youTubeSearchContextActive = true
+        return clicked
+    }
 
     private fun clickYouTubeSubscriptionsAffordance(): Boolean =
         clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_SUBSCRIPTIONS)
@@ -1635,6 +1996,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             UiChromeRole.YOUTUBE_SHORTS -> "Shorts"
             UiChromeRole.YOUTUBE_SUBSCRIPTIONS -> "Subscriptions"
             UiChromeRole.YOUTUBE_YOU -> "You"
+            UiChromeRole.YOUTUBE_BACK -> return false
         }
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         try {
@@ -2311,6 +2673,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         DetectedSurface.INSTAGRAM_PROFILE -> "Profile"
         DetectedSurface.INSTAGRAM_CREATE -> "Create"
         DetectedSurface.YOUTUBE_SHORTS -> "Shorts"
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO -> "Unsubscribed video"
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS -> "Unsubscribed Short"
         DetectedSurface.YOUTUBE_HOME -> "Home"
         DetectedSurface.YOUTUBE_SUBSCRIPTIONS -> "Subscriptions"
         DetectedSurface.YOUTUBE_YOU -> "You"
@@ -2345,6 +2709,21 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         YouTubeSurface.UNKNOWN -> DetectedSurface.UNKNOWN
     }
 
+    private fun com.example.tasktunnel.detector.YouTubeDetection.toPolicyTunnelSurface(
+        task: TunnelTask?,
+    ): DetectedSurface {
+        val base = surface.toTunnelSurface()
+        if (task != TunnelTask.YOUTUBE_SUBSCRIPTIONS ||
+            creatorSubscriptionState != YouTubeSubscriptionState.NOT_SUBSCRIBED
+        ) return base
+
+        return when (surface) {
+            YouTubeSurface.YOUTUBE_VIDEO -> DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO
+            YouTubeSurface.YOUTUBE_SHORTS -> DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS
+            else -> base
+        }
+    }
+
     private fun TikTokSurface.toTunnelSurface(): DetectedSurface = when (this) {
         TikTokSurface.TIKTOK_FEED -> DetectedSurface.TIKTOK_FEED
         TikTokSurface.TIKTOK_FRIENDS -> DetectedSurface.TIKTOK_FRIENDS
@@ -2368,15 +2747,22 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             YouTubeSurfaceDetector.YOUTUBE_PACKAGE,
             TikTokFingerprint.TIKTOK_PACKAGE,
         )
+        private const val YOUTUBE_OPEN_SUBSCRIPTIONS_ACTION =
+            "com.google.android.youtube.action.open.subscriptions"
+        private const val YOUTUBE_SUBSCRIPTIONS_FEED_URI =
+            "https://www.youtube.com/feed/subscriptions"
         private const val MAX_NODES = 200
         private const val MAX_DEPTH = 12
         private const val MAX_HISTORY = 8
         private const val MAX_FIELD_LENGTH = 200
         private const val CAPTURE_THROTTLE_MS = 1_000L
+        private const val YOUTUBE_SUBSCRIPTION_PROBE_ATTEMPTS = 2
+        private const val YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS = 650L
         private const val DEADLINE_RETRY_MS = 1_000L
         private const val OVERLAY_DISMISS_SETTLE_MS = 120L
         private const val DESTINATION_NAVIGATION_SETTLE_MS = 350L
         private const val INSTAGRAM_MAIN_FEED_SETTLE_MS = 550L
+        private const val YOUTUBE_SUBSCRIPTIONS_DESTINATION_SETTLE_MS = 700L
         private const val TIKTOK_ROUTE_STEP_SETTLE_MS = 500L
         private const val TIKTOK_INBOX_MAX_BACK_STEPS = 2
         private const val DIRECTED_TAB_MAX_BACK_STEPS = 2

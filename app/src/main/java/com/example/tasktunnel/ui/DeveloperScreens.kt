@@ -179,6 +179,7 @@ private fun DetectionCard(observed: ObservedYouTubeDetection?, current: Boolean)
             Text(if (current) "Current YouTube surface" else "Last observed YouTube detection", style = MaterialTheme.typography.titleMedium)
             if (observed == null) Text("No YouTube tree captured this service session.") else {
                 Text("Surface: ${observed.detection.surface.name}")
+                Text("Creator subscription: ${observed.detection.creatorSubscriptionState?.name ?: "UNKNOWN"}")
                 Text("Confidence: ${(observed.detection.confidence * 100).toInt()}% evidence strength")
                 Text("Package: ${observed.packageName.ifEmpty { "Unavailable" }}")
                 Text("Captured: ${formatTime(observed.capturedAtMillis)}")

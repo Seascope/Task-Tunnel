@@ -48,12 +48,14 @@ class SessionPolicyTest {
     }
 
     @Test
-    fun youtubeSubscriptions_allowsFeedAndSelectedVideosButBlocksRecommendationSurfaces() {
+    fun youtubeSubscriptions_allowsSubscribedOrUnknownCreatorContentButBlocksExplicitUnsubscribedContent() {
         assertEquals(PolicyDecision.ALLOW, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_SUBSCRIPTIONS))
         assertEquals(PolicyDecision.ALLOW, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_VIDEO))
+        assertEquals(PolicyDecision.ALLOW, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_SHORTS))
+        assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO))
+        assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS))
         assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_OTHER))
         assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_HOME))
-        assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_SHORTS))
         assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_SEARCH))
         assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.YOUTUBE_SUBSCRIPTIONS, DetectedSurface.YOUTUBE_YOU))
     }

@@ -19,11 +19,11 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import com.example.tasktunnel.R
 import com.example.tasktunnel.attention.surfaceLabel
-import com.example.tasktunnel.attention.taskLabel
 import com.example.tasktunnel.tunnel.IntentionCheckInKind
 import com.example.tasktunnel.tunnel.TunnelPrompt
 import com.example.tasktunnel.tunnel.TunnelRuntimeState
 import com.example.tasktunnel.tunnel.TunnelStatus
+import com.example.tasktunnel.tunnel.TunnelTask
 import kotlin.math.roundToInt
 
 /**
@@ -145,7 +145,7 @@ class TunnelNotificationController(private val context: Context) {
         val intervention = (state.prompt as? TunnelPrompt.Intervention)?.takeIf { it.sessionId == session.id }
         val checkIn = (state.prompt as? TunnelPrompt.IntentionCheckIn)?.takeIf { it.sessionId == session.id }
 
-        val purpose = taskLabel(session.task)
+        val purpose = notificationTaskLabel(session.task)
         val contextLine = when {
             expired -> "Time complete"
             detourSurface != null -> "${surfaceLabel(detourSurface)} allowed temporarily"
@@ -223,7 +223,7 @@ class TunnelNotificationController(private val context: Context) {
         val showContinue = expired || checkIn?.kind == IntentionCheckInKind.OPEN_ENDED_BROWSE
 
         return RemoteViews(context.packageName, R.layout.notification_tunnel_expanded).apply {
-            setTextViewText(R.id.notification_purpose, taskLabel(session.task))
+            setTextViewText(R.id.notification_purpose, notificationTaskLabel(session.task))
             setTextViewText(R.id.notification_context, "${session.app.displayName} · $contextLine")
 
             if (largeIcon != null) {
@@ -272,6 +272,20 @@ class TunnelNotificationController(private val context: Context) {
                 actionPendingIntent(ACTION_END, session.id, REQUEST_END),
             )
         }
+    }
+
+    private fun notificationTaskLabel(task: TunnelTask): String = when (task) {
+        TunnelTask.INSTAGRAM_MESSAGES -> "Reply to messages"
+        TunnelTask.INSTAGRAM_SEARCH -> "Search Instagram"
+        TunnelTask.INSTAGRAM_POST -> "Post something"
+        TunnelTask.INSTAGRAM_BROWSE -> "Browse intentionally"
+        TunnelTask.YOUTUBE_SEARCH_WATCH -> "Search / watch specific"
+        TunnelTask.YOUTUBE_SUBSCRIPTIONS -> "Check subscriptions"
+        TunnelTask.YOUTUBE_SHORTS -> "Watch Shorts"
+        TunnelTask.YOUTUBE_BROWSE -> "Browse intentionally"
+        TunnelTask.TIKTOK_SEARCH_WATCH -> "Search / watch specific"
+        TunnelTask.TIKTOK_INBOX -> "Check messages"
+        TunnelTask.TIKTOK_BROWSE -> "Browse intentionally"
     }
 
     private fun actionPendingIntent(action: String, sessionId: String, requestCode: Int): PendingIntent {
