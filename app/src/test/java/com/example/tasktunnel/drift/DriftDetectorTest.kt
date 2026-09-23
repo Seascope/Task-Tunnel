@@ -58,6 +58,19 @@ class DriftDetectorTest {
         assertEquals(listOf(INSTAGRAM, YOUTUBE, TIKTOK), detector.pendingCheckIn?.involvedPackages)
     }
 
+
+    @Test
+    fun pendingEpisodeStaysFrozenAtTheThreeAppsThatTriggeredIt() {
+        val detector = detector(selected = SELECTED_WITH_TIKTOK)
+
+        detector.observeForeground(INSTAGRAM, 0)
+        detector.observeForeground(REDDIT, 10)
+        detector.observeForeground(YOUTUBE, 20)
+        detector.observeForeground(TIKTOK, 30)
+
+        assertEquals(listOf(INSTAGRAM, REDDIT, YOUTUBE), detector.pendingCheckIn?.involvedPackages)
+    }
+
     @Test
     fun threeDistinctAppsOutsideWindowDoNotTrigger() {
         val detector = detector(window = 60, quiet = 1_000)
@@ -104,6 +117,20 @@ class DriftDetectorTest {
         detector.observeForeground(INSTAGRAM, 30)
 
         assertNull(detector.pendingCheckIn)
+        assertTrue(detector.state.episode?.checkInShown == true)
+    }
+
+
+    @Test
+    fun visibleCheckInSurvivesQuietResetUntilItIsResolved() {
+        val detector = detector(quiet = 60)
+        trigger(detector)
+        val episode = requireNotNull(detector.pendingCheckIn)
+        detector.markCheckInShown(episode.id)
+
+        detector.observeForeground(INSTAGRAM, 100)
+
+        assertEquals(episode.id, detector.state.episode?.id)
         assertTrue(detector.state.episode?.checkInShown == true)
     }
 

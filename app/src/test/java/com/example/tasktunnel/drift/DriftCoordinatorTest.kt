@@ -45,6 +45,20 @@ class DriftCoordinatorTest {
         assertNull(drift.state.episode)
     }
 
+
+    @Test
+    fun dismissedShownCheckInRearmsFromCurrentAppInsteadOfGettingStuck() {
+        val drift = coordinator()
+        triggerEndingOn(drift, REDDIT)
+        val episode = requireNotNull(drift.checkInCandidate(false))
+        drift.markCheckInShown(episode.id)
+
+        drift.dismissShownCheckIn(30)
+
+        assertNull(drift.state.episode)
+        assertEquals(listOf(REDDIT), drift.state.transitions.map { it.packageName })
+    }
+
     @Test
     fun foregroundObservationsAreNotClearedByTunnelLifecycle() {
         val drift = coordinator()

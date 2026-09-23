@@ -81,6 +81,7 @@ object SessionPolicy {
             TunnelTask.INSTAGRAM_MESSAGES -> when (surface) {
                 DetectedSurface.INSTAGRAM_MESSAGES,
                 DetectedSurface.INSTAGRAM_EXPLORE,
+                DetectedSurface.INSTAGRAM_PROFILE,
                 DetectedSurface.INSTAGRAM_OTHER,
                 -> PolicyDecision.ALLOW
                 in instagramSurfaces -> PolicyDecision.INTERVENE
@@ -264,9 +265,17 @@ class TunnelCoordinator(
 
     fun setCheckInsEnabled(enabled: Boolean) {
         checkInsEnabled = enabled
-        if (!enabled && state.prompt is TunnelPrompt.IntentionCheckIn) {
-            state = state.copy(prompt = null, checkIn = null)
+        if (!enabled) {
+            state = state.copy(
+                prompt = state.prompt.takeUnless { it is TunnelPrompt.IntentionCheckIn },
+                checkIn = null,
+            )
         }
+    }
+
+    /** Clears all live tunnel state without changing any persisted user preference. */
+    fun reset() {
+        state = TunnelRuntimeState()
     }
 
     fun observeForeground(packageName: String, nowMillis: Long) {
@@ -313,6 +322,10 @@ class TunnelCoordinator(
                         prompt = TunnelPrompt.PurposeGate(app),
                         overrideScope = null,
                         returnCooldown = null,
+                        checkIn = null,
+                        currentSurface = null,
+                        currentSurfaceObservedAtMillis = null,
+                        detourAllow = null,
                         leftProtectedAppAtMillis = null,
                     )
                 } else {
@@ -327,6 +340,14 @@ class TunnelCoordinator(
                         },
                         checkIn = state.checkIn?.takeIf {
                             it.sessionId == session.id && (leftAt == null || it.kind != IntentionCheckInKind.DETOUR_RENEWAL)
+                        }?.let { checkIn ->
+                            if (leftAt != null && checkIn.kind == IntentionCheckInKind.OPEN_ENDED_BROWSE &&
+                                checkIn.nextCheckAtMillis != null
+                            ) {
+                                checkIn.copy(
+                                    nextCheckAtMillis = checkIn.nextCheckAtMillis + (nowMillis - leftAt).coerceAtLeast(0L),
+                                )
+                            } else checkIn
                         },
                         currentSurface = state.currentSurface,
                         currentSurfaceObservedAtMillis = state.currentSurfaceObservedAtMillis,
@@ -342,7 +363,9 @@ class TunnelCoordinator(
                     it.sessionId == session.id && nowMillis < it.expiresAtMillis
                 },
                 returnCooldown = null,
-                checkIn = null,
+                checkIn = state.checkIn?.takeIf {
+                    it.sessionId == session.id && it.kind == IntentionCheckInKind.OPEN_ENDED_BROWSE
+                },
                 currentSurface = null,
                 currentSurfaceObservedAtMillis = null,
                 detourAllow = null,
@@ -381,7 +404,10 @@ class TunnelCoordinator(
 
 
     fun requestPurposeChange(sessionId: String, nowMillis: Long): Boolean {
-        val session = state.activeSession?.takeIf { it.id == sessionId } ?: return false
+        advanceTime(nowMillis)
+        val session = state.activeSession?.takeIf {
+            it.id == sessionId && it.status == TunnelStatus.ACTIVE
+        } ?: return false
         val remaining = session.expiresAtMillis?.let { (it - nowMillis).coerceAtLeast(0L) }
             ?.takeIf { it > 0L }
         state = state.copy(
@@ -399,10 +425,15 @@ class TunnelCoordinator(
         nowMillis: Long,
         intendedDurationMillis: Long? = null,
         evaluateCurrentSurface: Boolean = true,
-    ) {
-        val gate = state.prompt as? TunnelPrompt.PurposeGate ?: return
-        if (gate.app != task.app) return
-        if (gate.replacingSessionId != null && state.activeSession?.id != gate.replacingSessionId) return
+    ): Boolean {
+        advanceTime(nowMillis)
+        val gate = state.prompt as? TunnelPrompt.PurposeGate ?: return false
+        if (gate.app != task.app) return false
+        if (gate.replacingSessionId != null && state.activeSession?.let {
+                it.id == gate.replacingSessionId && it.status == TunnelStatus.ACTIVE
+            } != true
+        ) return false
+        val normalizedCurrentSurface = state.currentSurface.normalizeForTask(task)
         state = state.copy(
             activeSession = TunnelSession(
                 id = idFactory(),
@@ -415,7 +446,7 @@ class TunnelCoordinator(
             overrideScope = null,
             returnCooldown = null,
             checkIn = null,
-            currentSurface = state.currentSurface,
+            currentSurface = normalizedCurrentSurface,
             currentSurfaceObservedAtMillis = state.currentSurfaceObservedAtMillis,
             detourAllow = null,
             leftProtectedAppAtMillis = null,
@@ -438,6 +469,7 @@ class TunnelCoordinator(
         ) {
             observeSurface(currentSurface, nowMillis)
         }
+        return true
     }
 
     fun reevaluateCurrentSurface(nowMillis: Long) {
@@ -480,7 +512,6 @@ class TunnelCoordinator(
                 checkIn = state.checkIn?.takeUnless {
                     it.kind == IntentionCheckInKind.DETOUR_RENEWAL && it.surface == previousDetourSurface
                 },
-                overrideScope = null,
                 detourAllow = null,
             )
         }
@@ -649,8 +680,10 @@ class TunnelCoordinator(
                 status = TunnelStatus.ACTIVE,
             ),
             prompt = null,
-            overrideScope = state.overrideScope?.takeIf { nowMillis < it.expiresAtMillis },
+            overrideScope = null,
             returnCooldown = null,
+            checkIn = null,
+            detourAllow = null,
             leftProtectedAppAtMillis = null,
         )
     }
@@ -689,9 +722,8 @@ class TunnelCoordinator(
 
     fun advanceTime(nowMillis: Long) {
         val session = state.activeSession ?: return
-        val override = state.overrideScope?.takeIf {
-            it.sessionId == session.id && nowMillis < it.expiresAtMillis
-        }
+        val previousOverride = state.overrideScope?.takeIf { it.sessionId == session.id }
+        val override = previousOverride?.takeIf { nowMillis < it.expiresAtMillis }
         val cooldown = state.returnCooldown?.takeIf {
             it.sessionId == session.id && nowMillis < it.untilMillis
         }
@@ -713,32 +745,80 @@ class TunnelCoordinator(
                     prompt = currentGate,
                     overrideScope = null,
                     returnCooldown = null,
+                    checkIn = null,
+                    detourAllow = null,
                     leftProtectedAppAtMillis = null,
                 )
                 return
             }
-        } else if (session.isExpiredAt(nowMillis)) {
+            // A quick app switch does not end the tunnel, but tunnel check-ins must never
+            // mature over Home or another app. Preserve the pending browse reminder until return.
+            state = state.copy(overrideScope = override, returnCooldown = cooldown)
+            return
+        }
+
+        if (session.isExpiredAt(nowMillis)) {
             state = state.copy(
                 activeSession = session.copy(status = TunnelStatus.EXPIRED),
                 prompt = TunnelPrompt.SessionExpired(session.id, session.app, session.task),
                 overrideScope = null,
                 returnCooldown = null,
+                checkIn = null,
+                detourAllow = null,
             )
             return
         }
-        if (checkInsEnabled) {
+
+        // If check-ins were toggled off and back on during an open-ended browse tunnel,
+        // restart the cadence from now instead of resurrecting an old overdue reminder.
+        if (checkInsEnabled && state.prompt == null && state.checkIn == null &&
+            session.task.isOpenEndedBrowse && session.intendedDurationMillis == null &&
+            state.foregroundPackage == session.app.packageName
+        ) {
+            state = state.copy(
+                checkIn = IntentionCheckInState(
+                    sessionId = session.id,
+                    kind = IntentionCheckInKind.OPEN_ENDED_BROWSE,
+                    nextCheckAtMillis = nowMillis + browseCheckInIntervalMillis,
+                ),
+            )
+        }
+
+        if (checkInsEnabled && state.prompt == null) {
             val checkIn = state.checkIn?.takeIf { it.sessionId == session.id && !it.suppressed }
             if (checkIn?.nextCheckAtMillis != null && nowMillis >= checkIn.nextCheckAtMillis &&
                 (checkIn.kind == IntentionCheckInKind.OPEN_ENDED_BROWSE || state.currentSurface == checkIn.surface)
             ) {
                 state = state.copy(
-                    prompt = TunnelPrompt.IntentionCheckIn(session.id, session.task, checkIn.kind, checkIn.surface, checkIn.shownCount + 1),
+                    prompt = TunnelPrompt.IntentionCheckIn(
+                        session.id,
+                        session.task,
+                        checkIn.kind,
+                        checkIn.surface,
+                        checkIn.shownCount + 1,
+                    ),
                     checkIn = checkIn.copy(shownCount = checkIn.shownCount + 1, nextCheckAtMillis = null),
                     overrideScope = null,
                 )
                 return
             }
         }
+
+        // Expiring a temporary allowance must restore correction immediately even if the
+        // accessibility tree does not emit another event at the exact expiry moment.
+        if (state.prompt == null && previousOverride != null && override == null &&
+            state.foregroundPackage == session.app.packageName &&
+            state.currentSurface == previousOverride.surface &&
+            SessionPolicy.evaluate(session.task, previousOverride.surface) == PolicyDecision.INTERVENE
+        ) {
+            state = state.copy(
+                prompt = TunnelPrompt.Intervention(session.id, session.task, previousOverride.surface),
+                overrideScope = null,
+                returnCooldown = cooldown,
+            )
+            return
+        }
+
         state = state.copy(overrideScope = override, returnCooldown = cooldown)
     }
 
@@ -749,13 +829,22 @@ class TunnelCoordinator(
             if (session.status == TunnelStatus.ACTIVE) {
                 session.expiresAtMillis?.let(::add)
                 state.leftProtectedAppAtMillis?.let { add(it + quickReturnGraceMillis) }
-                if (checkInsEnabled) {
+                if (checkInsEnabled && state.leftProtectedAppAtMillis == null && state.prompt == null &&
+                    state.foregroundPackage == session.app.packageName
+                ) {
                     state.checkIn?.takeIf { !it.suppressed && it.sessionId == session.id }
                         ?.nextCheckAtMillis?.let(::add)
                 }
             }
         }
         return deadlines.minOrNull()
+    }
+
+    private fun DetectedSurface?.normalizeForTask(task: TunnelTask): DetectedSurface? = when {
+        task == TunnelTask.YOUTUBE_SUBSCRIPTIONS -> this
+        this == DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO -> DetectedSurface.YOUTUBE_VIDEO
+        this == DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS -> DetectedSurface.YOUTUBE_SHORTS
+        else -> this
     }
 
     private fun TunnelSession.isExpiredAt(nowMillis: Long): Boolean =

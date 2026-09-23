@@ -56,6 +56,27 @@ class AttentionPatternAnalyzerTest {
     }
 
     @Test
+    fun recurringDriftPathKeepsExactArbitraryPackageSequence() {
+        val packages = listOf("com.spotify.music", "com.discord", "com.instagram.android")
+        val events = (0 until 3).map { index ->
+            AttentionEvent(
+                timestampMillis = index * 100L,
+                type = AttentionEventType.INTERVENTION,
+                subtype = AttentionSubtype.DRIFT_CHECK_IN,
+                driftEpisodeId = "arbitrary-$index",
+                relatedApps = listOf(AttentionApp.INSTAGRAM),
+                relatedPackages = packages,
+            )
+        }
+
+        val pattern = patterns(events).single { it.type == AttentionPatternType.RECURRING_DRIFT_PATH }
+
+        assertEquals(packages, pattern.packageSequence)
+        assertEquals(listOf(AttentionApp.INSTAGRAM), pattern.sequence)
+        assertEquals(3, pattern.evidenceCount)
+    }
+
+    @Test
     fun timeOfDayPatternUsesLocalTimeAndClearMajority() {
         val evening = listOf(18, 18, 19)
             .mapIndexed { index, hour -> driftAtHour(index, "e$index", hour) }
@@ -127,6 +148,6 @@ class AttentionPatternAnalyzerTest {
             set(GregorianCalendar.HOUR_OF_DAY, hour)
             add(GregorianCalendar.MINUTE, index)
         }.timeInMillis
-        return drift(timestamp - day, id, listOf(AttentionApp.INSTAGRAM, AttentionApp.YOUTUBE))
+        return drift(timestamp - day, id, listOf(AttentionApp.INSTAGRAM, AttentionApp.YOUTUBE, AttentionApp.REDDIT))
     }
 }

@@ -111,16 +111,31 @@ class AttentionEpisodeGrouperTest {
         val now = 10L * 24 * 60 * 60 * 1_000
         val recent = now - 1_000
         val old = now - 8L * 24 * 60 * 60 * 1_000
+        val driftApps = listOf(AttentionApp.INSTAGRAM, AttentionApp.REDDIT, AttentionApp.YOUTUBE)
         val events = listOf(
-            event(recent, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "d1"),
-            event(recent + 1, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "d1"),
-            event(recent + 2, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "d2"),
-            event(old, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "old"),
+            event(recent, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "d1", apps = driftApps),
+            event(recent + 1, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "d1", apps = driftApps),
+            event(recent + 2, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "d2", apps = driftApps),
+            event(old, AttentionEventType.INTERVENTION, AttentionSubtype.DRIFT_CHECK_IN, driftId = "old", apps = driftApps),
         )
 
         assertEquals(2, AttentionMetrics.from(events, now).driftEpisodesLastSevenDays)
         assertEquals(0, AttentionMetrics.from(emptyList(), now).driftEpisodesLastSevenDays)
         assertTrue(AttentionEpisodeGrouper.group(emptyList()).isEmpty())
+    }
+
+    @Test
+    fun incompleteLegacyDriftDoesNotInflateWeeklyMetric() {
+        val now = 10L * 24 * 60 * 60 * 1_000
+        val event = event(
+            now - 1_000,
+            AttentionEventType.INTERVENTION,
+            AttentionSubtype.DRIFT_CHECK_IN,
+            driftId = "legacy",
+            apps = listOf(AttentionApp.INSTAGRAM),
+        )
+
+        assertEquals(0, AttentionMetrics.from(listOf(event), now).driftEpisodesLastSevenDays)
     }
 
     private fun event(

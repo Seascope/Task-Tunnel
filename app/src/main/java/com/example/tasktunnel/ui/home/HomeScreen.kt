@@ -166,11 +166,9 @@ private fun HomeProtectionNotice(health: ProtectionHealth, turnProtectionOn: () 
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (isOff) {
-            TextButton(
-                onClick = turnProtectionOn,
-            ) { Text("Turn on") }
-        }
+        TextButton(
+            onClick = turnProtectionOn,
+        ) { Text(if (isOff) "Turn on" else "Fix") }
     }
 }
 

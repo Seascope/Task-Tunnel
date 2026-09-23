@@ -1,6 +1,8 @@
 package com.example.tasktunnel.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.animation.ValueAnimator
+import android.app.KeyguardManager
 import android.content.res.ColorStateList
 import android.content.Intent
 import android.content.BroadcastReceiver
@@ -16,6 +18,7 @@ import android.os.SystemClock
 import android.os.PowerManager
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.ViewGroup
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -50,6 +53,7 @@ import com.example.tasktunnel.friction.FrictionContext
 import com.example.tasktunnel.friction.FrictionOutcome
 import com.example.tasktunnel.friction.InterventionVariant
 import com.example.tasktunnel.notification.TunnelNotificationController
+import com.example.tasktunnel.protection.ProtectionMasterPreferences
 import com.example.tasktunnel.tunnel.DetectedSurface
 import com.example.tasktunnel.tunnel.IntentionCheckInKind
 import com.example.tasktunnel.tunnel.IntentionalCheckInPreferences
@@ -70,6 +74,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private val adaptiveFrictionStore by lazy { AdaptiveFrictionStore(applicationContext) }
     private val attentionRecorder by lazy { AttentionHistory.recorder(applicationContext) }
     private val tunnelNotificationController by lazy { TunnelNotificationController(applicationContext) }
+    private var protectionEnabled = true
     private val surfaceUsageTracker by lazy {
         SurfaceUsageTracker(
             SurfaceUsageRepository(AttentionDatabase.getInstance(applicationContext).surfaceUsageSegmentDao()),
@@ -78,17 +83,24 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: android.content.Context, intent: Intent) {
+            if (!protectionEnabled) return
             surfaceUsageTracker.setInteractive(intent.action == Intent.ACTION_SCREEN_ON, System.currentTimeMillis())
         }
     }
     private var screenReceiverRegistered = false
     private var testOverlayView: LinearLayout? = null
     private var tunnelOverlayView: LinearLayout? = null
+    private var exitingTunnelOverlayView: LinearLayout? = null
+    private var tunnelOverlayDimAnimator: ValueAnimator? = null
     private var driftOverlayView: LinearLayout? = null
     private var visualQaOverlayView: LinearLayout? = null
     private var shownTunnelPrompt: TunnelPrompt? = null
     private var instagramDirectedNavigationInProgress = false
     private var youTubeDirectedNavigationInProgress = false
+    private var tikTokDirectedNavigationInProgress = false
+    private var directedNavigationGeneration = 0L
+    private var directedNavigationOwnerSessionId: String? = null
+    private var directedNavigationOwnerPackage: String? = null
     /**
      * YouTube keeps the previously selected bottom tab highlighted while Search is layered on top.
      * This bounded, content-free context lets the detector distinguish Search results from the
@@ -103,13 +115,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
      */
     private var youTubeSubscriptionProbeAttemptsRemaining = 0
     private var youTubeSubscriptionProbePending = false
-    private var tikTokDirectedNavigationInProgress = false
     private var lastCaptureAtElapsed = 0L
     private var lastTargetPackage: String? = null
-    private val showOverlay = Runnable { showTestOverlayNow() }
-    private val trailingCapture = Runnable { captureCurrentRoot() }
+    private val showOverlay = Runnable { if (protectionEnabled) showTestOverlayNow() }
+    private val trailingCapture = Runnable { if (protectionEnabled) captureCurrentRoot() }
     private val youTubeSubscriptionProbe = Runnable {
         youTubeSubscriptionProbePending = false
+        if (!protectionEnabled) return@Runnable
         val session = tunnelCoordinator.state.activeSession
         if (session?.task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
             session.app.packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE &&
@@ -120,10 +132,20 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
     private val tunnelDeadline = object : Runnable {
         override fun run() {
+            if (!protectionEnabled) return
             val nowMillis = System.currentTimeMillis()
             val packageName = activeRootPackage()
             if (packageName == null) {
                 handler.postDelayed(this, DEADLINE_RETRY_MS)
+            } else if (isTransientSystemUi(packageName)) {
+                // The unlocked notification/quick-settings shade is a transient shell, not an
+                // app switch. Keep timers/check-ins moving without making SystemUI the tunnel's
+                // foreground package or trying to render a prompt over the shade.
+                tunnelCoordinator.advanceTime(nowMillis)
+                syncTunnelState()
+                tunnelNotificationController.sync(tunnelCoordinator.state)
+                scheduleNotificationProgressRefresh()
+                scheduleTunnelDeadline()
             } else {
                 tunnelCoordinator.observeForeground(packageName, nowMillis)
                 updateTunnelUi()
@@ -132,6 +154,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
     private val notificationProgressRefresh = object : Runnable {
         override fun run() {
+            if (!protectionEnabled) return
             tunnelNotificationController.sync(tunnelCoordinator.state)
             scheduleNotificationProgressRefresh()
         }
@@ -140,14 +163,27 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         current = this
+        protectionEnabled = ProtectionMasterPreferences.load(this)
         tunnelNotificationController.ensureChannel()
+        // Reconcile any notification left behind by an abrupt prior process/service death. The
+        // coordinator is the source of truth; a fresh coordinator means there is no live tunnel.
+        tunnelNotificationController.sync(tunnelCoordinator.state)
         driftCoordinator.updateSelectedPackages(DriftPoolPreferences.load(this))
-        syncTunnelState { it.copy(connected = true, lastHeartbeatMillis = System.currentTimeMillis()) }
+        tunnelCoordinator.setCheckInsEnabled(IntentionalCheckInPreferences.load(applicationContext))
+        if (!protectionEnabled) {
+            tunnelCoordinator.reset()
+            driftCoordinator.clear()
+            tunnelNotificationController.cancel()
+        }
+        val connectedAtMillis = System.currentTimeMillis()
+        syncTunnelState { it.copy(connected = true, lastHeartbeatMillis = connectedAtMillis) }
         val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF) }
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(screenReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
         else @Suppress("DEPRECATION") registerReceiver(screenReceiver, filter)
         screenReceiverRegistered = true
-        surfaceUsageTracker.setInteractive(getSystemService(PowerManager::class.java).isInteractive, System.currentTimeMillis())
+        if (protectionEnabled) {
+            resumeProtectionFromCurrentForeground(connectedAtMillis)
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -159,6 +195,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
         if (!isInspectionEvent) return
+        if (!protectionEnabled) return
         AccessibilityRuntime.heartbeat()
         val state = AccessibilityRuntime.state.value
         val packageName = activeRootPackage() ?: run {
@@ -166,6 +203,19 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             AccessibilityRuntime.clearCurrentInstagramDetection()
             AccessibilityRuntime.clearCurrentTikTokCapture()
             failOpenCurrentSurface()
+            return
+        }
+        if (isTransientSystemUi(packageName)) {
+            // Opening the notification shade must not count as leaving the protected app. It used
+            // to clear check-ins, start the quick-return timer, contaminate Drift, and could even
+            // destroy an expired session before its notification action was pressed.
+            val nowMillis = System.currentTimeMillis()
+            surfaceUsageTracker.foregroundChanged(null, nowMillis)
+            tunnelCoordinator.advanceTime(nowMillis)
+            syncTunnelState()
+            tunnelNotificationController.sync(tunnelCoordinator.state)
+            scheduleNotificationProgressRefresh()
+            scheduleTunnelDeadline()
             return
         }
         if (packageName != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
@@ -176,6 +226,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
         if (packageName != TikTokSurfaceDetector.TIKTOK_PACKAGE) AccessibilityRuntime.clearCurrentTikTokCapture()
         val nowMillis = System.currentTimeMillis()
+        if (directedNavigationOwnerPackage != null && directedNavigationOwnerPackage != packageName) {
+            invalidateDirectedNavigation()
+        }
         surfaceUsageTracker.foregroundChanged(packageName, nowMillis)
         tunnelCoordinator.observeForeground(packageName, nowMillis)
         driftCoordinator.observeForeground(
@@ -215,21 +268,34 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             }
             return
         }
-        val targetChanged = packageName in TARGET_PACKAGES &&
-            lastTargetPackage != null && packageName != lastTargetPackage
-        if (packageName in TARGET_PACKAGES) lastTargetPackage = packageName
+        val previousTargetPackage = lastTargetPackage
+        val targetChanged = packageName in TARGET_PACKAGES && packageName != previousTargetPackage
+        val leftTarget = packageName !in TARGET_PACKAGES && previousTargetPackage != null
+        lastTargetPackage = packageName.takeIf { it in TARGET_PACKAGES }
 
         AccessibilityRuntime.update {
             val history = if (it.foregroundPackage != packageName) {
                 (listOf(PackageTransition(packageName, System.currentTimeMillis())) + it.packageHistory).take(MAX_HISTORY)
             } else it.packageHistory
+            val inspectionStatus = when {
+                !it.inspectionArmed -> it.inspectionStatus
+                packageName !in TARGET_PACKAGES -> InspectionStatus.UNSUPPORTED_APP
+                targetChanged -> InspectionStatus.ARMED
+                else -> it.inspectionStatus
+            }
+            val inspectionDetail = when {
+                !it.inspectionArmed -> it.inspectionDetail
+                packageName !in TARGET_PACKAGES -> "Inspection supports Instagram, YouTube, and TikTok."
+                targetChanged -> "Target changed; waiting for a fresh tree."
+                else -> it.inspectionDetail
+            }
             it.copy(
                 foregroundPackage = packageName,
                 lastRelevantEvent = eventTypeName(event.eventType),
                 packageHistory = history,
-                snapshot = if (targetChanged) null else it.snapshot,
-                inspectionStatus = if (targetChanged && it.inspectionArmed) InspectionStatus.ARMED else it.inspectionStatus,
-                inspectionDetail = if (targetChanged && it.inspectionArmed) "Target changed; waiting for a fresh tree." else it.inspectionDetail,
+                snapshot = if (targetChanged || leftTarget) null else it.snapshot,
+                inspectionStatus = inspectionStatus,
+                inspectionDetail = inspectionDetail,
             )
         }
 
@@ -252,10 +318,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun tearDownRuntime() {
         youTubeSearchContextActive = false
         clearYouTubeSubscriptionProbe()
-        handler.removeCallbacks(showOverlay)
-        handler.removeCallbacks(trailingCapture)
-        handler.removeCallbacks(tunnelDeadline)
-        handler.removeCallbacks(notificationProgressRefresh)
+        handler.removeCallbacksAndMessages(null)
         removeTestOverlay()
         removeTunnelOverlay()
         removeDriftOverlay()
@@ -266,6 +329,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             screenReceiverRegistered = false
         }
         driftCoordinator.clear()
+        tunnelCoordinator.reset()
+        invalidateDirectedNavigation()
+        lastTargetPackage = null
+        lastCaptureAtElapsed = 0L
         tunnelNotificationController.cancel()
         if (current === this) current = null
         AccessibilityRuntime.update {
@@ -287,36 +354,142 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     fun onNotificationChangePurpose(sessionId: String) {
+        if (!protectionEnabled) return
         if (tunnelCoordinator.state.activeSession?.id != sessionId) return
         dismissNotificationShadeThen(sessionId, requireProtectedApp = false) {
-            if (tunnelCoordinator.requestPurposeChange(sessionId, System.currentTimeMillis())) {
+            val nowMillis = System.currentTimeMillis()
+            tunnelCoordinator.advanceTime(nowMillis)
+            val state = tunnelCoordinator.state
+            val session = state.activeSession?.takeIf { it.id == sessionId }
+            if (session == null) {
+                // The quick-return grace or timer may have elapsed while the shade was closing.
+                // Reconcile the notification immediately instead of leaving a dead card behind.
                 updateTunnelUi()
+                return@dismissNotificationShadeThen
             }
+            val changed = when (val prompt = state.prompt) {
+                is TunnelPrompt.SessionExpired -> {
+                    if (prompt.sessionId != sessionId) false
+                    else {
+                        attentionRecorder.tunnelDecision(
+                            session,
+                            AttentionSubtype.EXPIRY_CHOOSE_ANOTHER,
+                            AttentionDecision.CHOOSE_ANOTHER_PURPOSE,
+                            nowMillis,
+                        )
+                        tunnelCoordinator.chooseAnotherPurpose()
+                        true
+                    }
+                }
+                is TunnelPrompt.IntentionCheckIn -> {
+                    if (prompt.sessionId != sessionId) false
+                    else {
+                        attentionRecorder.tunnelDecision(
+                            session,
+                            AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER,
+                            AttentionDecision.CHECK_IN_CHOOSE_ANOTHER,
+                            nowMillis,
+                            prompt.surface,
+                        )
+                        // Match the overlay action exactly: a check-in purpose change resolves the
+                        // old session rather than creating a replacement gate that can retain the
+                        // stale check-in underneath it.
+                        tunnelCoordinator.chooseAnotherPurpose()
+                        true
+                    }
+                }
+                else -> tunnelCoordinator.requestPurposeChange(sessionId, nowMillis)
+            }
+            if (changed) updateTunnelUi()
         }
     }
 
     fun onNotificationContinue(sessionId: String) {
+        if (!protectionEnabled) return
         if (tunnelCoordinator.state.activeSession?.id != sessionId) return
-        dismissNotificationShadeThen(sessionId, requireProtectedApp = true) {
+        dismissNotificationShadeThen(sessionId, requireProtectedApp = false) {
+            val nowMillis = System.currentTimeMillis()
+            tunnelCoordinator.advanceTime(nowMillis)
             val state = tunnelCoordinator.state
-            if (state.activeSession?.id != sessionId) return@dismissNotificationShadeThen
-            when (state.prompt) {
-                is TunnelPrompt.SessionExpired -> tunnelCoordinator.continueExpiredSession(System.currentTimeMillis())
-                is TunnelPrompt.IntentionCheckIn -> tunnelCoordinator.continueCheckIn(System.currentTimeMillis())
+            val session = state.activeSession?.takeIf { it.id == sessionId }
+                ?: return@dismissNotificationShadeThen
+            when (val prompt = state.prompt) {
+                is TunnelPrompt.SessionExpired -> {
+                    if (prompt.sessionId != sessionId) return@dismissNotificationShadeThen
+                    attentionRecorder.tunnelDecision(
+                        session,
+                        AttentionSubtype.EXPIRY_CONTINUE,
+                        AttentionDecision.CONTINUE,
+                        nowMillis,
+                    )
+                    tunnelCoordinator.continueExpiredSession(nowMillis)
+                }
+                is TunnelPrompt.IntentionCheckIn -> {
+                    if (prompt.sessionId != sessionId) return@dismissNotificationShadeThen
+                    attentionRecorder.tunnelDecision(
+                        session,
+                        AttentionSubtype.CHECK_IN_CONTINUE,
+                        AttentionDecision.CHECK_IN_CONTINUE,
+                        nowMillis,
+                        prompt.surface,
+                    )
+                    tunnelCoordinator.continueCheckIn(nowMillis)
+                }
                 else -> return@dismissNotificationShadeThen
             }
             updateTunnelUi()
-            scheduleCapture(NOTIFICATION_ACTION_SETTLE_MS)
+            if (activeRootPackage() == session.app.packageName) {
+                scheduleCapture(NOTIFICATION_ACTION_SETTLE_MS)
+            }
         }
     }
 
     fun onNotificationEnd(sessionId: String) {
-        if (tunnelCoordinator.state.activeSession?.id != sessionId) return
+        if (!protectionEnabled) return
+        val state = tunnelCoordinator.state
+        val session = state.activeSession?.takeIf { it.id == sessionId } ?: return
+        val nowMillis = System.currentTimeMillis()
+        when (val prompt = state.prompt) {
+            is TunnelPrompt.SessionExpired -> if (prompt.sessionId == sessionId) {
+                attentionRecorder.tunnelDecision(
+                    session,
+                    AttentionSubtype.EXPIRY_FINISH,
+                    AttentionDecision.FINISH,
+                    nowMillis,
+                )
+            }
+            is TunnelPrompt.IntentionCheckIn -> if (prompt.sessionId == sessionId) {
+                attentionRecorder.tunnelDecision(
+                    session,
+                    AttentionSubtype.CHECK_IN_END,
+                    AttentionDecision.CHECK_IN_END,
+                    nowMillis,
+                    prompt.surface,
+                )
+            }
+            is TunnelPrompt.Intervention -> if (prompt.sessionId == sessionId) {
+                attentionRecorder.tunnelDecision(
+                    session,
+                    AttentionSubtype.END_TUNNEL,
+                    AttentionDecision.END_TUNNEL,
+                    nowMillis,
+                    prompt.surface,
+                )
+            }
+            else -> attentionRecorder.tunnelDecision(
+                session,
+                AttentionSubtype.END_TUNNEL,
+                AttentionDecision.END_TUNNEL,
+                nowMillis,
+                state.currentSurface,
+            )
+        }
         tunnelCoordinator.endSession()
         updateTunnelUi()
     }
 
     fun onNotificationDismissed(sessionId: String) {
+        if (!protectionEnabled) return
         if (tunnelCoordinator.state.activeSession?.id != sessionId) return
         tunnelNotificationController.suppressForSession(sessionId)
     }
@@ -335,11 +508,23 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     ) {
         val session = tunnelCoordinator.state.activeSession?.takeIf { it.id == sessionId } ?: return
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+            val dismissed = performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+            if (!dismissed && isTransientSystemUi(activeRootPackage())) {
+                // GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE is a system action and can be absent
+                // on some implementations. Back is a safe fallback only while the unlocked
+                // SystemUI shade actually owns the active window.
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            sendBroadcast(Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS))
         }
         fun runWhenReady(remaining: Int) {
+            if (!protectionEnabled) return
             if (tunnelCoordinator.state.activeSession?.id != sessionId) return
-            if (!requireProtectedApp || activeRootPackage() == session.app.packageName) {
+            val foregroundPackage = activeRootPackage()
+            val systemUiGone = foregroundPackage != null && foregroundPackage != SYSTEM_UI_PACKAGE
+            if (systemUiGone && (!requireProtectedApp || foregroundPackage == session.app.packageName)) {
                 action()
                 return
             }
@@ -353,6 +538,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     fun onInspectionArmed(armed: Boolean) {
+        if (!protectionEnabled) {
+            handler.removeCallbacks(trailingCapture)
+            return
+        }
         if (armed && BuildConfig.DEBUG) {
             val packageName = activeRootPackage()
             if (packageName in TARGET_PACKAGES) scheduleCapture() else AccessibilityRuntime.update {
@@ -365,7 +554,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     fun scheduleTestOverlay(): Boolean {
-        if (!BuildConfig.DEBUG) return false
+        if (!protectionEnabled || !BuildConfig.DEBUG) return false
         if (tunnelCoordinator.state.prompt != null || driftOverlayView != null) return false
         handler.removeCallbacks(showOverlay)
         removeTestOverlay()
@@ -375,7 +564,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     fun showVisualQaOverlay(overlay: VisualQaOverlay): Boolean {
-        if (!BuildConfig.DEBUG) return false
+        if (!protectionEnabled || !BuildConfig.DEBUG) return false
         removeVisualQaOverlay()
         val now = System.currentTimeMillis()
         val layout = when (overlay) {
@@ -428,13 +617,119 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
+    fun onProtectionEnabledChanged(enabled: Boolean) {
+        if (protectionEnabled == enabled) return
+        protectionEnabled = enabled
+        val nowMillis = System.currentTimeMillis()
+        if (!enabled) {
+            tunnelCoordinator.state.activeSession?.let { session ->
+                attentionRecorder.tunnelDecision(
+                    session,
+                    AttentionSubtype.END_TUNNEL,
+                    AttentionDecision.END_TUNNEL,
+                    nowMillis,
+                    tunnelCoordinator.state.currentSurface,
+                )
+            }
+
+            // OFF is a hard quiescent boundary. Remove every delayed service callback, including
+            // notification-shade retries and multi-step directed navigation, so no stale work can
+            // wake the feature back up after the user has paused it.
+            handler.removeCallbacksAndMessages(null)
+            clearYouTubeSubscriptionProbe()
+            removeTestOverlay()
+            removeTunnelOverlay()
+            removeDriftOverlay()
+            removeVisualQaOverlay()
+            surfaceUsageTracker.close(nowMillis)
+            tunnelCoordinator.reset()
+            driftCoordinator.clear()
+            tunnelNotificationController.cancel()
+            youTubeSearchContextActive = false
+            invalidateDirectedNavigation()
+            lastTargetPackage = null
+            lastCaptureAtElapsed = 0L
+            syncTunnelState {
+                it.copy(
+                    foregroundPackage = null,
+                    lastRelevantEvent = null,
+                    currentYouTubeDetection = null,
+                    currentInstagramDetection = null,
+                    currentTikTokCapture = null,
+                    overlayPending = false,
+                    overlayVisible = false,
+                )
+            }
+            return
+        }
+
+        resumeProtectionFromCurrentForeground(nowMillis)
+    }
+
+    private fun resumeProtectionFromCurrentForeground(nowMillis: Long) {
+        if (!protectionEnabled) return
+
+        driftCoordinator.updateSelectedPackages(DriftPoolPreferences.load(this))
+        tunnelCoordinator.setCheckInsEnabled(IntentionalCheckInPreferences.load(applicationContext))
+        surfaceUsageTracker.setInteractive(
+            getSystemService(PowerManager::class.java).isInteractive,
+            nowMillis,
+        )
+        AccessibilityRuntime.heartbeat(nowMillis)
+
+        val packageName = activeRootPackage()
+        if (packageName == null || isTransientSystemUi(packageName)) {
+            syncTunnelState { it.copy(lastHeartbeatMillis = nowMillis) }
+            return
+        }
+
+        surfaceUsageTracker.foregroundChanged(packageName, nowMillis)
+        tunnelCoordinator.observeForeground(packageName, nowMillis)
+        driftCoordinator.observeForeground(packageName, nowMillis)
+        lastTargetPackage = packageName.takeIf { it in TARGET_PACKAGES }
+        AccessibilityRuntime.update {
+            val history = if (it.foregroundPackage != packageName) {
+                (listOf(PackageTransition(packageName, nowMillis)) + it.packageHistory).take(MAX_HISTORY)
+            } else {
+                it.packageHistory
+            }
+            it.copy(
+                foregroundPackage = packageName,
+                lastRelevantEvent = "Protection resumed",
+                packageHistory = history,
+                currentYouTubeDetection = null,
+                currentInstagramDetection = null,
+                currentTikTokCapture = null,
+            )
+        }
+        updateTunnelUi()
+        if (shouldCapture(packageName, AccessibilityRuntime.state.value.inspectionArmed)) {
+            scheduleCapture()
+        }
+    }
+
     fun onDriftPoolChanged(packages: Set<String>) {
+        if (!protectionEnabled) return
         driftCoordinator.updateSelectedPackages(packages)
         removeDriftOverlay()
         updateTunnelUi()
     }
 
+    fun onIntentionalCheckInsEnabledChanged(enabled: Boolean) {
+        if (!protectionEnabled) return
+        tunnelCoordinator.setCheckInsEnabled(enabled)
+        updateTunnelUi()
+    }
+
+    fun onAttentionHistoryCleared() {
+        // History clear is a generation boundary for both writers. Queued pre-clear writes are
+        // discarded so old events/usage cannot reappear after Room has been cleared.
+        attentionRecorder.onHistoryCleared()
+        surfaceUsageTracker.discardActive()
+    }
+
     private fun scheduleCapture(minDelayMillis: Long = 0L) {
+        if (!protectionEnabled) return
         val elapsed = SystemClock.elapsedRealtime()
         val throttleDelay = CAPTURE_THROTTLE_MS - (elapsed - lastCaptureAtElapsed)
         val delay = maxOf(throttleDelay, minDelayMillis)
@@ -443,6 +738,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun captureCurrentRoot() {
+        if (!protectionEnabled) return
         val state = AccessibilityRuntime.state.value
         lastCaptureAtElapsed = SystemClock.elapsedRealtime()
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { null }
@@ -822,6 +1118,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         return try { root.packageName?.toString() } catch (_: RuntimeException) { null } finally { recycleNode(root) }
     }
 
+    private fun isTransientSystemUi(packageName: String?): Boolean {
+        if (packageName != SYSTEM_UI_PACKAGE) return false
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        return !keyguard.isKeyguardLocked
+    }
+
     private fun shouldCapture(packageName: String?, inspectionArmed: Boolean): Boolean =
         packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE ||
             packageName == InstagramSurfaceDetector.INSTAGRAM_PACKAGE ||
@@ -863,9 +1165,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT,
         ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = 96 }
         try {
+            getSystemService(WindowManager::class.java).addView(layout, params)
             testOverlayView = layout
+            surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
             AccessibilityRuntime.update { it.copy(overlayVisible = true) }
         } catch (_: RuntimeException) {
+            testOverlayView = null
             AccessibilityRuntime.update { it.copy(overlayVisible = false) }
         }
     }
@@ -874,6 +1179,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val view = testOverlayView ?: return
         try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
         testOverlayView = null
+        surfaceUsageTracker.setOverlayVisible(false, System.currentTimeMillis())
         AccessibilityRuntime.update { it.copy(overlayVisible = false) }
     }
 
@@ -884,13 +1190,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun failOpenCurrentSurface() {
+        if (!protectionEnabled) return
         surfaceUsageTracker.foregroundChanged(null, System.currentTimeMillis())
         tunnelCoordinator.observeSurface(DetectedSurface.UNKNOWN, System.currentTimeMillis())
         updateTunnelUi()
     }
 
     private fun updateTunnelUi() {
-        tunnelCoordinator.setCheckInsEnabled(IntentionalCheckInPreferences.load(applicationContext))
+        if (!protectionEnabled) return
         syncTunnelState()
         // Drift is the entry-level intervention for rapid app hopping. It should beat the
         // ordinary Purpose Gate, but never an active Tunnel interaction. Refresh it first so a
@@ -906,12 +1213,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun scheduleNotificationProgressRefresh() {
         handler.removeCallbacks(notificationProgressRefresh)
+        if (!protectionEnabled) return
         if (!tunnelNotificationController.shouldRefreshProgress(tunnelCoordinator.state)) return
         handler.postDelayed(notificationProgressRefresh, TunnelNotificationController.PROGRESS_REFRESH_MILLIS)
     }
 
     private fun scheduleTunnelDeadline() {
         handler.removeCallbacks(tunnelDeadline)
+        if (!protectionEnabled) return
         val deadline = tunnelCoordinator.nextDeadlineMillis() ?: return
         handler.postDelayed(tunnelDeadline, (deadline - System.currentTimeMillis()).coerceAtLeast(0L))
     }
@@ -927,6 +1236,16 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
         if (prompt != null) removeDriftOverlay()
         if (prompt == shownTunnelPrompt && tunnelOverlayView != null) return
+
+        val shownPurposeGate = shownTunnelPrompt as? TunnelPrompt.PurposeGate
+        val purposeGateLeftForeground = prompt == null &&
+            shownPurposeGate != null &&
+            tunnelCoordinator.state.foregroundPackage != shownPurposeGate.app.packageName
+        if (purposeGateLeftForeground) {
+            animatePurposeGateExit()
+            return
+        }
+
         removeTunnelOverlay()
         if (prompt == null) return
 
@@ -954,8 +1273,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             dimAmount = 0.42f
         }
         try {
-            surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
             getSystemService(WindowManager::class.java).addView(layout, params)
+            surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
             val isPurposeGate = prompt is TunnelPrompt.PurposeGate
             if (isPurposeGate) {
                 layout.alpha = 0f
@@ -977,6 +1296,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 nowMillis = System.currentTimeMillis(),
             )
         } catch (_: RuntimeException) {
+            runCatching { getSystemService(WindowManager::class.java).removeView(layout) }
+            surfaceUsageTracker.setOverlayVisible(false, System.currentTimeMillis())
             tunnelOverlayView = null
             shownTunnelPrompt = null
         }
@@ -985,10 +1306,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun refreshDriftOverlay() {
         val tunnelState = tunnelCoordinator.state
         val foregroundPackage = driftCoordinator.foregroundPackage
-        val promptBlocksDrift = tunnelState.prompt != null && tunnelState.prompt !is TunnelPrompt.PurposeGate
+        val promptBlocksDrift = when (val prompt = tunnelState.prompt) {
+            null -> false
+            is TunnelPrompt.PurposeGate -> prompt.replacingSessionId != null
+            else -> true
+        }
         val activeTunnelOwnsForeground = tunnelState.activeSession?.app?.packageName == foregroundPackage
         if (activeTunnelOwnsForeground || promptBlocksDrift || !driftCoordinator.isSelected(foregroundPackage)) {
-            removeDriftOverlay()
+            dismissVisibleDriftOverlay()
             return
         }
 
@@ -996,7 +1321,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         // TunnelCoordinator create that app's normal Purpose Gate. Drift still owns the decision
         // point, so discard the hidden gate rather than letting it replace the check-in.
         if (driftOverlayView != null) {
-            if (tunnelCoordinator.state.prompt is TunnelPrompt.PurposeGate) {
+            val purposeGate = tunnelCoordinator.state.prompt as? TunnelPrompt.PurposeGate
+            if (purposeGate != null && purposeGate.replacingSessionId == null) {
                 tunnelCoordinator.dismissPurposeGate()
             }
             removeTunnelOverlay()
@@ -1009,7 +1335,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         // A newly entered supported app normally creates its Purpose Gate immediately. A valid
         // Drift episode is more useful at this point, so consume that ordinary gate. "Set an
         // intention" below can explicitly request a fresh Purpose Gate if the user chooses it.
-        if (tunnelCoordinator.state.prompt is TunnelPrompt.PurposeGate) {
+        val purposeGate = tunnelCoordinator.state.prompt as? TunnelPrompt.PurposeGate
+        if (purposeGate != null && purposeGate.replacingSessionId == null) {
             tunnelCoordinator.dismissPurposeGate()
         }
 
@@ -1029,13 +1356,15 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             dimAmount = 0.32f
         }
         try {
-            surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
             getSystemService(WindowManager::class.java).addView(layout, params)
+            surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
             animateOverlayEntrance(layout)
             driftOverlayView = layout
             driftCoordinator.markCheckInShown(episode.id)
             attentionRecorder.driftCheckInShown(episode, System.currentTimeMillis())
         } catch (_: RuntimeException) {
+            runCatching { getSystemService(WindowManager::class.java).removeView(layout) }
+            surfaceUsageTracker.setOverlayVisible(false, System.currentTimeMillis())
             driftOverlayView = null
         }
     }
@@ -1487,7 +1816,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun sessionExpiredView(prompt: TunnelPrompt.SessionExpired) = baseTunnelOverlay().apply {
         addView(overlayText("Your chosen time is complete", heading = true))
         addView(overlayText("What would you like to do next?", secondary = true))
-        addView(overlayPrimaryButton(if (prompt.task == TunnelTask.INSTAGRAM_BROWSE || prompt.task == TunnelTask.YOUTUBE_BROWSE) {
+        addView(overlayPrimaryButton(if (prompt.task in setOf(
+                TunnelTask.INSTAGRAM_BROWSE,
+                TunnelTask.YOUTUBE_BROWSE,
+                TunnelTask.TIKTOK_BROWSE,
+            )
+        ) {
             "Keep browsing"
         } else {
             "Continue"
@@ -1533,13 +1867,22 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun startTunnel(task: TunnelTask, intendedDurationMillis: Long?) {
         val nowMillis = System.currentTimeMillis()
-        val directedDestination = task.hasDirectedDestination()
-        tunnelCoordinator.startSession(
+        val stateBeforeStart = tunnelCoordinator.state
+        val alreadyAtDestination = stateBeforeStart.foregroundPackage == task.app.packageName &&
+            task.acceptsCurrentDirectedDestination(stateBeforeStart.currentSurface)
+        val directedDestination = task.hasDirectedDestination() && !alreadyAtDestination
+        val started = tunnelCoordinator.startSession(
             task = task,
             nowMillis = nowMillis,
             intendedDurationMillis = intendedDurationMillis,
             evaluateCurrentSurface = !directedDestination,
         )
+        if (!started) {
+            // A stale gate/callback must never navigate or record a purpose that the coordinator
+            // rejected (for example, when a replacement session expired while the picker was open).
+            updateTunnelUi()
+            return
+        }
         tunnelCoordinator.state.activeSession?.let { attentionRecorder.purposeSelected(it, nowMillis) }
         updateTunnelUi()
         if (directedDestination) {
@@ -1565,22 +1908,50 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         -> false
     }
 
+    private fun TunnelTask.acceptsCurrentDirectedDestination(surface: DetectedSurface?): Boolean = when (this) {
+        TunnelTask.INSTAGRAM_MESSAGES -> surface == DetectedSurface.INSTAGRAM_MESSAGES
+        TunnelTask.INSTAGRAM_SEARCH -> surface == DetectedSurface.INSTAGRAM_EXPLORE
+        TunnelTask.INSTAGRAM_POST -> surface == DetectedSurface.INSTAGRAM_CREATE
+        TunnelTask.YOUTUBE_SEARCH_WATCH -> surface in setOf(
+            DetectedSurface.YOUTUBE_SEARCH,
+            DetectedSurface.YOUTUBE_VIDEO,
+            DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
+        )
+        TunnelTask.YOUTUBE_SUBSCRIPTIONS -> surface == DetectedSurface.YOUTUBE_SUBSCRIPTIONS
+        TunnelTask.YOUTUBE_SHORTS -> surface in setOf(
+            DetectedSurface.YOUTUBE_SHORTS,
+            DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
+        )
+        TunnelTask.TIKTOK_SEARCH_WATCH -> surface == DetectedSurface.TIKTOK_SEARCH
+        TunnelTask.TIKTOK_INBOX -> surface == DetectedSurface.TIKTOK_INBOX
+        TunnelTask.INSTAGRAM_BROWSE,
+        TunnelTask.YOUTUBE_BROWSE,
+        TunnelTask.TIKTOK_BROWSE,
+        -> false
+    }
+
     private fun navigateToTaskDestinationAfterOverlayDismiss(task: TunnelTask) {
+        val sessionId = tunnelCoordinator.state.activeSession
+            ?.takeIf { it.status == TunnelStatus.ACTIVE }
+            ?.id
+            ?: return
         handler.postDelayed({
+            if (!canContinueDirectedNavigation(sessionId)) return@postDelayed
             if (activeRootPackage() != task.app.packageName) {
                 if (!launchSupportedApp(task.app)) {
                     tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
                     updateTunnelUi()
                     return@postDelayed
                 }
-                awaitTaskAppThenNavigate(task, NOTIFICATION_ACTION_MAX_ATTEMPTS)
+                awaitTaskAppThenNavigate(task, sessionId, NOTIFICATION_ACTION_MAX_ATTEMPTS)
                 return@postDelayed
             }
             navigateToTaskDestinationNow(task)
         }, OVERLAY_DISMISS_SETTLE_MS)
     }
 
-    private fun awaitTaskAppThenNavigate(task: TunnelTask, attemptsRemaining: Int) {
+    private fun awaitTaskAppThenNavigate(task: TunnelTask, sessionId: String, attemptsRemaining: Int) {
+        if (!canContinueDirectedNavigation(sessionId)) return
         if (activeRootPackage() == task.app.packageName) {
             navigateToTaskDestinationNow(task)
             return
@@ -1591,9 +1962,80 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             return
         }
         handler.postDelayed(
-            { awaitTaskAppThenNavigate(task, attemptsRemaining - 1) },
+            { awaitTaskAppThenNavigate(task, sessionId, attemptsRemaining - 1) },
             NOTIFICATION_ACTION_RETRY_MS,
         )
+    }
+
+    private fun canContinueDirectedNavigation(sessionId: String): Boolean {
+        if (!protectionEnabled) return false
+        val state = tunnelCoordinator.state
+        return state.activeSession?.let { it.id == sessionId && it.status == TunnelStatus.ACTIVE } == true &&
+            state.prompt == null
+    }
+
+    private fun beginDirectedNavigation(task: TunnelTask): Boolean {
+        val state = tunnelCoordinator.state
+        val session = state.activeSession?.takeIf {
+            it.status == TunnelStatus.ACTIVE && it.app == task.app && state.prompt == null
+        } ?: return false
+        if (activeRootPackage() != task.app.packageName) return false
+
+        directedNavigationGeneration += 1
+        directedNavigationOwnerSessionId = session.id
+        directedNavigationOwnerPackage = task.app.packageName
+        instagramDirectedNavigationInProgress = false
+        youTubeDirectedNavigationInProgress = false
+        tikTokDirectedNavigationInProgress = false
+        return true
+    }
+
+    private fun directedNavigationIsCurrent(
+        generation: Long,
+        sessionId: String,
+        app: SupportedApp,
+    ): Boolean {
+        if (!protectionEnabled || generation != directedNavigationGeneration) return false
+        if (directedNavigationOwnerSessionId != sessionId || directedNavigationOwnerPackage != app.packageName) return false
+        if (activeRootPackage() != app.packageName) return false
+        val state = tunnelCoordinator.state
+        return state.activeSession?.let {
+            it.id == sessionId && it.status == TunnelStatus.ACTIVE && it.app == app
+        } == true && state.prompt == null
+    }
+
+    private fun postDirectedNavigationStep(
+        app: SupportedApp,
+        delayMillis: Long,
+        action: () -> Unit,
+    ) {
+        val generation = directedNavigationGeneration
+        val sessionId = directedNavigationOwnerSessionId ?: return
+        if (directedNavigationOwnerPackage != app.packageName) return
+        handler.postDelayed({
+            if (!directedNavigationIsCurrent(generation, sessionId, app)) {
+                invalidateDirectedNavigation(generation)
+                return@postDelayed
+            }
+            action()
+        }, delayMillis)
+    }
+
+    private fun invalidateDirectedNavigation(expectedGeneration: Long? = null) {
+        if (expectedGeneration != null && expectedGeneration != directedNavigationGeneration) return
+        directedNavigationGeneration += 1
+        directedNavigationOwnerSessionId = null
+        directedNavigationOwnerPackage = null
+        instagramDirectedNavigationInProgress = false
+        youTubeDirectedNavigationInProgress = false
+        tikTokDirectedNavigationInProgress = false
+    }
+
+    private fun completeDirectedNavigation(app: SupportedApp) {
+        if (directedNavigationOwnerPackage != app.packageName) return
+        invalidateDirectedNavigation()
+        handler.removeCallbacks(trailingCapture)
+        captureCurrentRoot()
     }
 
     private fun launchSupportedApp(app: SupportedApp): Boolean = runCatching {
@@ -1604,6 +2046,20 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }.getOrDefault(false)
 
     private fun navigateToTaskDestinationNow(task: TunnelTask) {
+        if (!beginDirectedNavigation(task)) {
+            tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
+            updateTunnelUi()
+            return
+        }
+        if (task == TunnelTask.INSTAGRAM_MESSAGES) {
+            instagramDirectedNavigationInProgress = true
+            if (navigateToTaskDestination(task)) {
+                finishInstagramDirectedNavigationAfterSettle()
+            } else {
+                failInstagramDirectedNavigation()
+            }
+            return
+        }
         if (task == TunnelTask.TIKTOK_SEARCH_WATCH) {
             navigateToTikTokSearch()
             return
@@ -1623,10 +2079,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val navigated = navigateToTaskDestination(task)
         if (!navigated) {
             // A directed tunnel must never silently accept the surface it started on.
+            invalidateDirectedNavigation()
             tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
             updateTunnelUi()
+            return
         }
-        handler.postDelayed({ captureCurrentRoot() }, DESTINATION_NAVIGATION_SETTLE_MS)
+        postDirectedNavigationStep(task.app, DESTINATION_NAVIGATION_SETTLE_MS) {
+            completeDirectedNavigation(task.app)
+        }
     }
 
     private fun navigateToInstagramDestination(task: TunnelTask) {
@@ -1662,9 +2122,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
         when {
             clickInstagramHomeAffordance() ->
-                handler.postDelayed({ retryInstagramCreateFromMainShell() }, DESTINATION_NAVIGATION_SETTLE_MS)
+                postDirectedNavigationStep(SupportedApp.INSTAGRAM, DESTINATION_NAVIGATION_SETTLE_MS) { retryInstagramCreateFromMainShell() }
             openInstagramMainFeed() ->
-                handler.postDelayed({ retryInstagramCreateFromMainShell() }, INSTAGRAM_MAIN_FEED_SETTLE_MS)
+                postDirectedNavigationStep(SupportedApp.INSTAGRAM, INSTAGRAM_MAIN_FEED_SETTLE_MS) { retryInstagramCreateFromMainShell() }
             else -> failInstagramDirectedNavigation()
         }
     }
@@ -1678,13 +2138,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             failInstagramDirectedNavigation()
             return
         }
-        handler.postDelayed({
+        postDirectedNavigationStep(SupportedApp.INSTAGRAM, DESTINATION_NAVIGATION_SETTLE_MS) {
             if (isInstagramCreateFlowVisible() || clickInstagramCreateAffordance()) {
                 finishInstagramDirectedNavigationAfterSettle()
             } else {
                 failInstagramDirectedNavigation()
             }
-        }, DESTINATION_NAVIGATION_SETTLE_MS)
+        }
     }
 
     private fun backTowardInstagramMainShell(task: TunnelTask, backStepsRemaining: Int) {
@@ -1692,27 +2152,23 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             failInstagramDirectedNavigation()
             return
         }
-        handler.postDelayed({
+        postDirectedNavigationStep(SupportedApp.INSTAGRAM, DESTINATION_NAVIGATION_SETTLE_MS) {
             if (navigateToTaskDestination(task)) {
                 finishInstagramDirectedNavigationAfterSettle()
             } else {
                 backTowardInstagramMainShell(task, backStepsRemaining - 1)
             }
-        }, DESTINATION_NAVIGATION_SETTLE_MS)
+        }
     }
 
     private fun finishInstagramDirectedNavigationAfterSettle() {
-        handler.postDelayed({
-            instagramDirectedNavigationInProgress = false
-            handler.removeCallbacks(trailingCapture)
-            captureCurrentRoot()
-        }, DESTINATION_NAVIGATION_SETTLE_MS)
+        postDirectedNavigationStep(SupportedApp.INSTAGRAM, DESTINATION_NAVIGATION_SETTLE_MS) {
+            completeDirectedNavigation(SupportedApp.INSTAGRAM)
+        }
     }
 
     private fun failInstagramDirectedNavigation() {
-        instagramDirectedNavigationInProgress = false
-        handler.removeCallbacks(trailingCapture)
-        captureCurrentRoot()
+        completeDirectedNavigation(SupportedApp.INSTAGRAM)
     }
 
     private fun clickInstagramSearchAffordance(): Boolean = clickAppAffordance(
@@ -1829,11 +2285,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             // "open subscriptions" destination, which asks the app to open the feed root directly.
             if (openYouTubeSubscriptionsDestination()) {
                 youTubeSearchContextActive = false
-                handler.postDelayed({
-                    youTubeDirectedNavigationInProgress = false
-                    handler.removeCallbacks(trailingCapture)
-                    captureCurrentRoot()
-                }, YOUTUBE_SUBSCRIPTIONS_DESTINATION_SETTLE_MS)
+                postDirectedNavigationStep(SupportedApp.YOUTUBE, YOUTUBE_SUBSCRIPTIONS_DESTINATION_SETTLE_MS) {
+                    completeDirectedNavigation(SupportedApp.YOUTUBE)
+                }
             } else {
                 navigateToYouTubeSubscriptionsRoot(DIRECTED_TAB_MAX_BACK_STEPS)
             }
@@ -1892,10 +2346,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     failYouTubeDirectedNavigation()
                     return
                 }
-                handler.postDelayed(
-                    { navigateToYouTubeSubscriptionsRoot(backStepsRemaining - 1) },
-                    DESTINATION_NAVIGATION_SETTLE_MS,
-                )
+                postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
+                    navigateToYouTubeSubscriptionsRoot(backStepsRemaining - 1)
+                }
                 return
             }
             YouTubeSurface.YOUTUBE_SEARCH,
@@ -1905,10 +2358,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     failYouTubeDirectedNavigation()
                     return
                 }
-                handler.postDelayed(
-                    { navigateToYouTubeSubscriptionsRoot(backStepsRemaining - 1) },
-                    DESTINATION_NAVIGATION_SETTLE_MS,
-                )
+                postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
+                    navigateToYouTubeSubscriptionsRoot(backStepsRemaining - 1)
+                }
                 return
             }
             else -> Unit
@@ -1920,7 +2372,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             failYouTubeDirectedNavigation()
             return
         }
-        handler.postDelayed({
+        postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
             captureCurrentRoot()
             when (AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface) {
                 YouTubeSurface.YOUTUBE_SUBSCRIPTIONS -> finishYouTubeDirectedNavigationAfterSettle()
@@ -1929,7 +2381,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 -> navigateToYouTubeSubscriptionsRoot(backStepsRemaining)
                 else -> failYouTubeDirectedNavigation()
             }
-        }, DESTINATION_NAVIGATION_SETTLE_MS)
+        }
     }
 
     private fun currentYouTubeSurfaceAllowsBackNavigation(): Boolean =
@@ -1945,7 +2397,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             failYouTubeDirectedNavigation()
             return
         }
-        handler.postDelayed({
+        postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
             if (navigateToTaskDestination(task)) {
                 finishYouTubeDirectedNavigationAfterSettle()
             } else if (hasYouTubeTopLevelChrome()) {
@@ -1955,7 +2407,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             } else {
                 backTowardYouTubeMainShell(task, backStepsRemaining - 1)
             }
-        }, DESTINATION_NAVIGATION_SETTLE_MS)
+        }
     }
 
     private fun hasYouTubeBackNavigationChrome(): Boolean {
@@ -2039,17 +2491,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun finishYouTubeDirectedNavigationAfterSettle() {
-        handler.postDelayed({
-            youTubeDirectedNavigationInProgress = false
-            handler.removeCallbacks(trailingCapture)
-            captureCurrentRoot()
-        }, DESTINATION_NAVIGATION_SETTLE_MS)
+        postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
+            completeDirectedNavigation(SupportedApp.YOUTUBE)
+        }
     }
 
     private fun failYouTubeDirectedNavigation() {
-        youTubeDirectedNavigationInProgress = false
-        handler.removeCallbacks(trailingCapture)
-        captureCurrentRoot()
+        completeDirectedNavigation(SupportedApp.YOUTUBE)
     }
 
     private fun clickYouTubeSearchAffordance(): Boolean {
@@ -2143,23 +2591,21 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             textLabels = setOf("For You", "Home"),
         )
         if (!routedToFeed) {
-            tikTokDirectedNavigationInProgress = false
+            invalidateDirectedNavigation()
             tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
             updateTunnelUi()
-            handler.postDelayed({ captureCurrentRoot() }, DESTINATION_NAVIGATION_SETTLE_MS)
+            scheduleCapture(DESTINATION_NAVIGATION_SETTLE_MS)
             return
         }
 
-        handler.postDelayed({
+        postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
             if (clickTikTokSearchAffordance()) {
                 finishTikTokDirectedNavigationAfterSettle()
             } else {
                 // Fail visibly on the settled surface instead of pretending navigation worked.
-                tikTokDirectedNavigationInProgress = false
-                handler.removeCallbacks(trailingCapture)
-                captureCurrentRoot()
+                failTikTokDirectedNavigation()
             }
-        }, TIKTOK_ROUTE_STEP_SETTLE_MS)
+        }
     }
 
     private fun clickTikTokSearchAffordance(): Boolean = clickAppAffordance(
@@ -2176,10 +2622,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             return
         }
         if (clickTikTokInboxAffordance()) {
-            handler.postDelayed(
-                { verifyTikTokInboxOrBack(TIKTOK_INBOX_MAX_BACK_STEPS) },
-                DESTINATION_NAVIGATION_SETTLE_MS,
-            )
+            postDirectedNavigationStep(SupportedApp.TIKTOK, DESTINATION_NAVIGATION_SETTLE_MS) {
+                verifyTikTokInboxOrBack(TIKTOK_INBOX_MAX_BACK_STEPS)
+            }
             return
         }
         backTowardTikTokMainShell(TIKTOK_INBOX_MAX_BACK_STEPS)
@@ -2198,20 +2643,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             failTikTokDirectedNavigation()
             return
         }
-        handler.postDelayed({
+        postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
             if (isTikTokInboxSelected()) {
                 finishTikTokDirectedNavigationAfterSettle()
-                return@postDelayed
-            }
-            if (clickTikTokInboxAffordance()) {
-                handler.postDelayed(
-                    { verifyTikTokInboxOrBack(backStepsRemaining - 1) },
-                    DESTINATION_NAVIGATION_SETTLE_MS,
-                )
+            } else if (clickTikTokInboxAffordance()) {
+                postDirectedNavigationStep(SupportedApp.TIKTOK, DESTINATION_NAVIGATION_SETTLE_MS) {
+                    verifyTikTokInboxOrBack(backStepsRemaining - 1)
+                }
             } else {
                 backTowardTikTokMainShell(backStepsRemaining - 1)
             }
-        }, TIKTOK_ROUTE_STEP_SETTLE_MS)
+        }
     }
 
     private fun clickTikTokInboxAffordance(): Boolean = clickAppAffordance(
@@ -2246,17 +2688,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun failTikTokDirectedNavigation() {
-        tikTokDirectedNavigationInProgress = false
-        handler.removeCallbacks(trailingCapture)
-        captureCurrentRoot()
+        completeDirectedNavigation(SupportedApp.TIKTOK)
     }
 
     private fun finishTikTokDirectedNavigationAfterSettle() {
-        handler.postDelayed({
-            tikTokDirectedNavigationInProgress = false
-            handler.removeCallbacks(trailingCapture)
-            captureCurrentRoot()
-        }, DESTINATION_NAVIGATION_SETTLE_MS)
+        postDirectedNavigationStep(SupportedApp.TIKTOK, DESTINATION_NAVIGATION_SETTLE_MS) {
+            completeDirectedNavigation(SupportedApp.TIKTOK)
+        }
     }
 
     private fun navigateToTaskDestination(task: TunnelTask): Boolean = when (task) {
@@ -2427,8 +2865,24 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         minHeight = dp(48)
         isClickable = true
         isFocusable = true
-        setBackgroundResource(android.R.drawable.list_selector_background)
+        if (quiet) {
+            setBackgroundResource(android.R.drawable.list_selector_background)
+        } else {
+            background = RippleDrawable(
+                ColorStateList.valueOf(COLOR_PRIMARY_RIPPLE),
+                GradientDrawable().apply {
+                    setColor(COLOR_TONAL_ACTION)
+                    cornerRadius = dp(12).toFloat()
+                },
+                null,
+            )
+        }
         setOnClickListener { action() }
+    }.also {
+        it.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)).apply {
+            topMargin = dp(if (quiet) 0 else 3)
+            bottomMargin = dp(if (quiet) 0 else 3)
+        }
     }
 
     private fun overlayDelayedTextButton(
@@ -2600,9 +3054,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 val selected = index == selectedIndex
                 option.setTextColor(if (selected) COLOR_PRIMARY else COLOR_SECONDARY_TEXT)
                 option.background = RippleDrawable(
-                    ColorStateList.valueOf(COLOR_PRIMARY),
+                    ColorStateList.valueOf(COLOR_PRIMARY_RIPPLE),
                     GradientDrawable().apply {
-                        setColor(if (selected) COLOR_DURATION_SELECTED else COLOR_DURATION_UNSELECTED)
+                        setColor(if (selected) COLOR_DURATION_SELECTED else COLOR_SHEET)
+                        setStroke(dp(1), if (selected) COLOR_PRIMARY else COLOR_DIVIDER)
                         cornerRadius = dp(10).toFloat()
                     },
                     null,
@@ -2672,14 +3127,89 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun removeTunnelOverlay() {
-        val hadOverlay = tunnelOverlayView != null
-        tunnelOverlayView?.let { view ->
-            try { getSystemService(WindowManager::class.java).removeView(view) } catch (_: RuntimeException) { }
-        }
+    private fun animatePurposeGateExit() {
+        val view = tunnelOverlayView ?: return
+        val windowManager = getSystemService(WindowManager::class.java)
+        val params = view.layoutParams as? WindowManager.LayoutParams
+
+        // Detach the logical overlay immediately so a newly arriving prompt is free to render.
+        // The old sheet remains only as a short, non-interactive visual exit.
         tunnelOverlayView = null
         shownTunnelPrompt = null
+        exitingTunnelOverlayView?.let { stale ->
+            stale.animate().cancel()
+            try { windowManager.removeView(stale) } catch (_: RuntimeException) { }
+        }
+        exitingTunnelOverlayView = view
+        setOverlayInteractionEnabled(view, false)
+
+        tunnelOverlayDimAnimator?.cancel()
+        if (params != null) {
+            val startDim = params.dimAmount
+            tunnelOverlayDimAnimator = ValueAnimator.ofFloat(startDim, 0f).apply {
+                duration = PURPOSE_GATE_EXIT_DURATION_MS
+                addUpdateListener { animator ->
+                    if (exitingTunnelOverlayView !== view) return@addUpdateListener
+                    params.dimAmount = animator.animatedValue as Float
+                    try { windowManager.updateViewLayout(view, params) } catch (_: RuntimeException) { }
+                }
+                start()
+            }
+        }
+
+        view.animate().cancel()
+        view.animate()
+            .alpha(0f)
+            .translationY(dp(18).toFloat())
+            .setDuration(PURPOSE_GATE_EXIT_DURATION_MS)
+            .setInterpolator(android.view.animation.AccelerateInterpolator())
+            .withEndAction {
+                if (exitingTunnelOverlayView !== view) return@withEndAction
+                try { windowManager.removeView(view) } catch (_: RuntimeException) { }
+                exitingTunnelOverlayView = null
+                tunnelOverlayDimAnimator?.cancel()
+                tunnelOverlayDimAnimator = null
+                surfaceUsageTracker.setOverlayVisible(false, System.currentTimeMillis())
+            }
+            .start()
+    }
+
+    private fun setOverlayInteractionEnabled(view: View, enabled: Boolean) {
+        view.isEnabled = enabled
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                setOverlayInteractionEnabled(view.getChildAt(index), enabled)
+            }
+        }
+    }
+
+    private fun removeTunnelOverlay() {
+        val windowManager = getSystemService(WindowManager::class.java)
+        val current = tunnelOverlayView
+        val exiting = exitingTunnelOverlayView
+        val hadOverlay = current != null || exiting != null
+
+        current?.animate()?.cancel()
+        exiting?.animate()?.cancel()
+        tunnelOverlayDimAnimator?.cancel()
+        tunnelOverlayDimAnimator = null
+
+        current?.let { view ->
+            try { windowManager.removeView(view) } catch (_: RuntimeException) { }
+        }
+        if (exiting != null && exiting !== current) {
+            try { windowManager.removeView(exiting) } catch (_: RuntimeException) { }
+        }
+        tunnelOverlayView = null
+        exitingTunnelOverlayView = null
+        shownTunnelPrompt = null
         if (hadOverlay) surfaceUsageTracker.setOverlayVisible(false, System.currentTimeMillis())
+    }
+
+    private fun dismissVisibleDriftOverlay() {
+        if (driftOverlayView == null) return
+        driftCoordinator.dismissShownCheckIn(System.currentTimeMillis())
+        removeDriftOverlay()
     }
 
     private fun removeDriftOverlay() {
@@ -2751,11 +3281,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun surfaceLabel(surface: DetectedSurface): String = when (surface) {
+        DetectedSurface.INSTAGRAM_MESSAGES -> "Messages"
         DetectedSurface.INSTAGRAM_REELS -> "Reels"
         DetectedSurface.INSTAGRAM_EXPLORE -> "Explore"
         DetectedSurface.INSTAGRAM_HOME -> "Home"
         DetectedSurface.INSTAGRAM_PROFILE -> "Profile"
         DetectedSurface.INSTAGRAM_CREATE -> "Create"
+        DetectedSurface.YOUTUBE_SEARCH -> "Search"
+        DetectedSurface.YOUTUBE_VIDEO -> "Video"
         DetectedSurface.YOUTUBE_SHORTS -> "Shorts"
         DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO -> "Unsubscribed video"
         DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS -> "Unsubscribed Short"
@@ -2825,6 +3358,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        private const val PURPOSE_GATE_EXIT_DURATION_MS = 140L
+        private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
         internal var current: TaskTunnelAccessibilityService? = null
         private val TARGET_PACKAGES = setOf(
             InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
@@ -2864,8 +3399,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         private const val COLOR_HANDLE = 0xFF5E646B.toInt()
         private const val COLOR_PRIMARY = 0xFF79AFFF.toInt()
         private const val COLOR_ON_PRIMARY = 0xFF061A32.toInt()
-        private const val COLOR_DURATION_SELECTED = 0xFF14345F.toInt()
-        private const val COLOR_DURATION_UNSELECTED = 0xFF202428.toInt()
+        private const val COLOR_PRIMARY_RIPPLE = 0x3379AFFF
+        private const val COLOR_TONAL_ACTION = 0xFF14345F.toInt()
+        private const val COLOR_DURATION_SELECTED = COLOR_TONAL_ACTION
         private val DURATION_CHOICES = listOf(
             DurationChoice("No limit", null),
             DurationChoice("5 min", 5 * 60_000L),

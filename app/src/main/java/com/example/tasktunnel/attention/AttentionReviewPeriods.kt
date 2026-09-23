@@ -1,5 +1,6 @@
 package com.example.tasktunnel.attention
 
+import com.example.tasktunnel.drift.DriftPolicy
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -88,6 +89,13 @@ data class ReviewPeriodSummary(
                 continued = decisions.count { it.subtype == AttentionSubtype.ALLOW_ANYWAY },
                 ended = decisions.count { it.subtype == AttentionSubtype.END_TUNNEL },
                 driftEpisodes = periodEvents.asSequence()
+                    .filter { event ->
+                        event.subtype == AttentionSubtype.DRIFT_CHECK_IN &&
+                            event.driftEpisodeId != null &&
+                            event.relatedPackages.ifEmpty { event.relatedApps.map(AttentionApp::packageName) }
+                                .distinct()
+                                .size >= DriftPolicy.DEFAULT_DISTINCT_APP_THRESHOLD
+                    }
                     .mapNotNull(AttentionEvent::driftEpisodeId)
                     .distinct()
                     .count(),

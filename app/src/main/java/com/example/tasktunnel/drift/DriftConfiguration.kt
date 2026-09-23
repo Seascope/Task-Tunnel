@@ -67,7 +67,7 @@ object DriftAppCatalog {
             .map(KnownDriftApp::packageName)
             .filter { it in knownPackages }
             .toCollection(linkedSetOf())
-        return installedDefaults.ifEmpty { knownPackages }
+        return installedDefaults
     }
 
     @Suppress("DEPRECATION")

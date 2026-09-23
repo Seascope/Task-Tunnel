@@ -134,6 +134,7 @@ fun SettingsRow(
     modifier: Modifier = Modifier,
     leading: (@Composable () -> Unit)? = null,
     trailingText: String? = null,
+    subtitleMaxLines: Int = 2,
     showChevron: Boolean = false,
     enabled: Boolean = true,
     onClick: (() -> Unit)? = null,
@@ -150,7 +151,15 @@ fun SettingsRow(
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
             Text(title, style = MaterialTheme.typography.titleMedium, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
-            subtitle?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            subtitle?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = subtitleMaxLines,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         if (trailingText != null) {
             Spacer(Modifier.width(12.dp))

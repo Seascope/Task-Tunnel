@@ -69,7 +69,7 @@ data class AttentionMetrics(val driftEpisodesLastSevenDays: Int) {
         fun from(events: List<AttentionEvent>, nowMillis: Long): AttentionMetrics {
             val cutoff = nowMillis - SEVEN_DAYS_MILLIS
             val driftCount = events.asSequence()
-                .filter { it.subtype == AttentionSubtype.DRIFT_CHECK_IN && it.timestampMillis >= cutoff }
+                .filter { it.timestampMillis >= cutoff && it.isValidDriftCheckIn() }
                 .mapNotNull(AttentionEvent::driftEpisodeId)
                 .distinct()
                 .count()
@@ -118,6 +118,7 @@ data class DailyAttentionRecap(
             val interventionTunnelIds = interventions.mapNotNull(AttentionEvent::tunnelId).toSet()
             val interventionDecisions = decisions.filter { it.tunnelId in interventionTunnelIds }
             val driftEpisodes = today.asSequence()
+                .filter(AttentionEvent::isValidDriftCheckIn)
                 .mapNotNull(AttentionEvent::driftEpisodeId)
                 .distinct()
                 .count()
@@ -152,3 +153,10 @@ data class LocalCalendarDay(val startMillis: Long, val endMillis: Long) {
 
 private fun AttentionEvent.occurrenceKey(): String =
     if (id != 0L) "id:$id" else listOf(timestampMillis, type, subtype, tunnelId, driftEpisodeId, surface, decision).joinToString("|")
+
+private fun AttentionEvent.isValidDriftCheckIn(): Boolean =
+    subtype == AttentionSubtype.DRIFT_CHECK_IN &&
+        driftEpisodeId != null &&
+        relatedPackages.ifEmpty { relatedApps.map(AttentionApp::packageName) }
+            .distinct()
+            .size >= DriftPolicy.DEFAULT_DISTINCT_APP_THRESHOLD

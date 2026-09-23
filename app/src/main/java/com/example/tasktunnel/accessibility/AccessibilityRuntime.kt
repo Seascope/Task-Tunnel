@@ -147,6 +147,18 @@ object AccessibilityRuntime {
         TaskTunnelAccessibilityService.current?.onDriftPoolChanged(packages)
     }
 
+    fun setProtectionEnabled(enabled: Boolean) {
+        TaskTunnelAccessibilityService.current?.onProtectionEnabledChanged(enabled)
+    }
+
+    fun setIntentionalCheckInsEnabled(enabled: Boolean) {
+        TaskTunnelAccessibilityService.current?.onIntentionalCheckInsEnabledChanged(enabled)
+    }
+
+    fun onAttentionHistoryCleared() {
+        TaskTunnelAccessibilityService.current?.onAttentionHistoryCleared()
+    }
+
     internal fun clearCurrentYouTubeDetection() = mutableState.update { it.copy(currentYouTubeDetection = null) }
 
     internal fun clearCurrentInstagramDetection() = mutableState.update { it.copy(currentInstagramDetection = null) }

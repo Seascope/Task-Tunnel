@@ -31,11 +31,11 @@ class TunnelCoordinatorM31Test {
         coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
         coordinator.allowAnyway(10)
 
-        coordinator.observeSurface(DetectedSurface.INSTAGRAM_EXPLORE, 11)
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_HOME, 11)
 
         assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
         assertEquals(
-            DetectedSurface.INSTAGRAM_EXPLORE,
+            DetectedSurface.INSTAGRAM_HOME,
             (coordinator.state.prompt as TunnelPrompt.Intervention).surface,
         )
     }
@@ -172,6 +172,125 @@ class TunnelCoordinatorM31Test {
         assertNull(coordinator.state.prompt)
         coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 102)
         assertTrue(coordinator.state.prompt is TunnelPrompt.PurposeGate)
+    }
+
+
+    @Test
+    fun openEndedBrowseCheckInPausesDuringQuickAppSwitch() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "browse-session" },
+            quickReturnGraceMillis = 500,
+            browseCheckInIntervalMillis = 100,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_BROWSE, 1))
+        assertEquals(101L, coordinator.state.checkIn?.nextCheckAtMillis)
+
+        coordinator.observeForeground("com.example.other", 50)
+        coordinator.advanceTime(150)
+
+        assertNull(coordinator.state.prompt)
+        assertEquals(550L, coordinator.nextDeadlineMillis())
+        assertEquals(101L, coordinator.state.checkIn?.nextCheckAtMillis)
+
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 151)
+
+        assertNull(coordinator.state.prompt)
+        assertEquals(202L, coordinator.state.checkIn?.nextCheckAtMillis)
+        coordinator.advanceTime(202)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.IntentionCheckIn)
+    }
+
+    @Test
+    fun dueCheckInDoesNotReplacePurposeChangePicker() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "browse-session" },
+            browseCheckInIntervalMillis = 100,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_BROWSE, 1))
+        assertTrue(coordinator.requestPurposeChange("browse-session", 90))
+
+        coordinator.advanceTime(150)
+
+        assertTrue(coordinator.state.prompt is TunnelPrompt.PurposeGate)
+        assertEquals(101L, coordinator.state.checkIn?.nextCheckAtMillis)
+        assertNull(coordinator.nextDeadlineMillis())
+
+        coordinator.dismissPurposeGate()
+        coordinator.advanceTime(150)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.IntentionCheckIn)
+    }
+
+    @Test
+    fun disablingCheckInsDropsOldReminderAndReenableStartsFreshCadence() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "browse-session" },
+            browseCheckInIntervalMillis = 100,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_BROWSE, 1))
+
+        coordinator.setCheckInsEnabled(false)
+        assertNull(coordinator.state.checkIn)
+        coordinator.advanceTime(500)
+        assertNull(coordinator.state.prompt)
+
+        coordinator.setCheckInsEnabled(true)
+        coordinator.advanceTime(500)
+        assertEquals(600L, coordinator.state.checkIn?.nextCheckAtMillis)
+        assertNull(coordinator.state.prompt)
+        coordinator.advanceTime(600)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.IntentionCheckIn)
+    }
+
+    @Test
+    fun allowanceExpiryReintervenesWithoutAnotherAccessibilityEvent() {
+        val coordinator = activeInstagram(duration = null)
+        coordinator.setCheckInsEnabled(false)
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
+        coordinator.allowAnyway(10)
+
+        coordinator.advanceTime(110)
+
+        val prompt = coordinator.state.prompt as TunnelPrompt.Intervention
+        assertEquals(DetectedSurface.INSTAGRAM_REELS, prompt.surface)
+        assertNull(coordinator.state.overrideScope)
+    }
+
+    @Test
+    fun expiredReplacementPickerCannotStartGhostPurpose() {
+        val coordinator = activeInstagram(duration = 100)
+        assertTrue(coordinator.requestPurposeChange("session-1", 50))
+
+        assertFalse(
+            coordinator.startSession(
+                TunnelTask.INSTAGRAM_SEARCH,
+                nowMillis = 101,
+                intendedDurationMillis = 50,
+            ),
+        )
+
+        assertEquals(TunnelTask.INSTAGRAM_MESSAGES, coordinator.state.activeSession?.task)
+        assertEquals(TunnelStatus.EXPIRED, coordinator.state.activeSession?.status)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.SessionExpired)
+    }
+
+    @Test
+    fun changingAwayFromSubscriptionsNormalizesCreatorSpecificCachedSurface() {
+        var id = 0
+        val coordinator = TunnelCoordinator(idFactory = { "session-${++id}" })
+        coordinator.observeForeground(SupportedApp.YOUTUBE.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.YOUTUBE_SUBSCRIPTIONS, 1))
+        coordinator.observeSurface(DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO, 10)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
+        assertTrue(coordinator.requestPurposeChange("session-1", 20))
+
+        assertTrue(coordinator.startSession(TunnelTask.YOUTUBE_SEARCH_WATCH, 20))
+
+        assertEquals(DetectedSurface.YOUTUBE_VIDEO, coordinator.state.currentSurface)
+        assertEquals(TunnelTask.YOUTUBE_SEARCH_WATCH, coordinator.state.activeSession?.task)
+        assertNull(coordinator.state.prompt)
     }
 
     @Test

@@ -11,7 +11,7 @@ class SessionPolicyTest {
         assertEquals(PolicyDecision.ALLOW, SessionPolicy.evaluate(TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.INSTAGRAM_OTHER))
         assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.INSTAGRAM_HOME))
         assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.INSTAGRAM_REELS))
-        assertEquals(PolicyDecision.INTERVENE, SessionPolicy.evaluate(TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.INSTAGRAM_PROFILE))
+        assertEquals(PolicyDecision.ALLOW, SessionPolicy.evaluate(TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.INSTAGRAM_PROFILE))
         assertEquals(PolicyDecision.UNKNOWN_FAIL_OPEN, SessionPolicy.evaluate(TunnelTask.INSTAGRAM_MESSAGES, DetectedSurface.UNKNOWN))
     }
 

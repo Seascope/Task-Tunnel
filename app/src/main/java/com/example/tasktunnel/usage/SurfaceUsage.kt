@@ -2,6 +2,7 @@ package com.example.tasktunnel.usage
 
 import android.content.Context
 import com.example.tasktunnel.attention.AttentionApp
+import com.example.tasktunnel.attention.LocalHistoryWriteGate
 import com.example.tasktunnel.attention.SurfaceUsageSegmentEntity
 import com.example.tasktunnel.attention.SurfaceUsageSegmentDao
 import com.example.tasktunnel.tunnel.DetectedSurface
@@ -87,8 +88,12 @@ class SurfaceUsageTracker(
     private val scope: CoroutineScope,
 ) {
     private data class Active(val app: AttentionApp, val surface: DetectedSurface?, val task: TunnelTask?, val startedAt: Long, val classified: Boolean)
+    private data class Observation(val app: AttentionApp, val surface: DetectedSurface, val task: TunnelTask?)
     private var active: Active? = null
+    private var lastObservation: Observation? = null
+    private var foregroundApp: AttentionApp? = null
     private var pendingUnknownSince: Long? = null
+    @Volatile private var historyGeneration = 0L
     private var interactive = true
     private var overlayVisible = false
 
@@ -103,19 +108,36 @@ class SurfaceUsageTracker(
 
     fun setOverlayVisible(value: Boolean, nowMillis: Long) {
         overlayVisible = value
-        if (value) close(nowMillis)
-        else {
+        if (value) {
+            close(nowMillis)
+        } else {
             close(nowMillis)
             pendingUnknownSince = null
+            val observation = lastObservation
+            if (interactive && observation != null && observation.app == foregroundApp) {
+                active = Active(observation.app, observation.surface, observation.task, nowMillis, true)
+            }
         }
     }
 
     fun foregroundChanged(packageName: String?, nowMillis: Long) {
-        if (active != null && AttentionApp.fromPackage(packageName) != active?.app) close(nowMillis)
+        val nextApp = AttentionApp.fromPackage(packageName)
+        foregroundApp = nextApp
+        if (active != null && nextApp != active?.app) close(nowMillis)
+        if (lastObservation?.app != nextApp) lastObservation = null
     }
 
     fun observe(packageName: String?, surface: DetectedSurface, task: TunnelTask?, nowMillis: Long) {
-        val app = AttentionApp.fromPackage(packageName) ?: run { close(nowMillis); return }
+        val app = AttentionApp.fromPackage(packageName) ?: run {
+            foregroundApp = null
+            lastObservation = null
+            close(nowMillis)
+            return
+        }
+        foregroundApp = app
+        if (surface != DetectedSurface.UNKNOWN) {
+            lastObservation = Observation(app, surface, task)
+        }
         if (!interactive || overlayVisible) return
         if (surface == DetectedSurface.UNKNOWN) {
             if (active != null && pendingUnknownSince == null) pendingUnknownSince = nowMillis
@@ -138,11 +160,24 @@ class SurfaceUsageTracker(
 
     fun close(nowMillis: Long) { active?.let { finish(it, nowMillis) }; active = null; pendingUnknownSince = null }
 
+    /** Drop the in-memory segment without persisting time from before a user-requested history clear. */
+    fun discardActive() {
+        historyGeneration += 1
+        active = null
+        lastObservation = null
+        pendingUnknownSince = null
+    }
+
     private fun finish(value: Active, endMillis: Long) {
         if (endMillis <= value.startedAt) return
+        val generation = historyGeneration
         scope.launch(Dispatchers.IO) {
-            repository.record(SurfaceUsageSegment(0, value.app, value.surface, value.startedAt, endMillis, value.task, if (value.classified) SurfaceUsageClassification.CLASSIFIED else SurfaceUsageClassification.UNCLASSIFIED))
-            repository.deleteOlderThan(endMillis - SURFACE_USAGE_RETENTION_DAYS * 24L * 60 * 60 * 1_000)
+            LocalHistoryWriteGate.runExclusive {
+                if (generation != historyGeneration) return@runExclusive
+                repository.record(SurfaceUsageSegment(0, value.app, value.surface, value.startedAt, endMillis, value.task, if (value.classified) SurfaceUsageClassification.CLASSIFIED else SurfaceUsageClassification.UNCLASSIFIED))
+                if (generation != historyGeneration) return@runExclusive
+                repository.deleteOlderThan(endMillis - SURFACE_USAGE_RETENTION_DAYS * 24L * 60 * 60 * 1_000)
+            }
         }
     }
 }

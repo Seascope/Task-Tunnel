@@ -86,8 +86,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             HomeSurfaceKind.UNCLASSIFIED to unclassifiedDurationMillis,
         )
         AttentionApp.YOUTUBE -> listOf(
-            HomeSurfaceKind.VIDEO to durationOf(DetectedSurface.YOUTUBE_VIDEO),
-            HomeSurfaceKind.SHORTS to durationOf(DetectedSurface.YOUTUBE_SHORTS),
+            HomeSurfaceKind.VIDEO to durationOf(
+                DetectedSurface.YOUTUBE_VIDEO,
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
+            ),
+            HomeSurfaceKind.SHORTS to durationOf(
+                DetectedSurface.YOUTUBE_SHORTS,
+                DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
+            ),
             HomeSurfaceKind.SEARCH to durationOf(DetectedSurface.YOUTUBE_SEARCH),
             HomeSurfaceKind.HOME to durationOf(DetectedSurface.YOUTUBE_HOME),
             HomeSurfaceKind.SUBSCRIPTIONS to durationOf(DetectedSurface.YOUTUBE_SUBSCRIPTIONS),
@@ -107,7 +113,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         AttentionApp.REDDIT -> emptyList()
     }
 
-    private fun SurfaceUsageSummary.durationOf(surface: DetectedSurface): Long = bySurface[surface] ?: 0L
+    private fun SurfaceUsageSummary.durationOf(vararg surfaces: DetectedSurface): Long =
+        surfaces.sumOf { surface -> bySurface[surface] ?: 0L }
 
     private fun midnightRefreshes(): Flow<Unit> = flow {
         while (true) {

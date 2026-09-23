@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
@@ -36,6 +37,9 @@ class TunnelNotificationController(private val context: Context) {
     private val manager = NotificationManagerCompat.from(context)
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
     private var lastRenderKey: String? = null
+    private var cachedIconPackage: String? = null
+    private var cachedIconDensityDpi: Int? = null
+    private var cachedAppIcon: Bitmap? = null
 
     fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -68,7 +72,13 @@ class TunnelNotificationController(private val context: Context) {
             manager.cancel(NOTIFICATION_ID)
             return
         }
-        if (!canPostNotifications()) return
+        if (!canPostNotifications()) {
+            // If posting is disabled, do not retain a successful render key. Otherwise an
+            // open-ended tunnel can stay notification-less after the user re-enables this app or
+            // channel because its state may still have the exact same render key.
+            lastRenderKey = null
+            return
+        }
 
         val renderKey = renderKey(state, nowMillis)
         if (renderKey == lastRenderKey) return
@@ -107,7 +117,13 @@ class TunnelNotificationController(private val context: Context) {
     private fun canPostNotifications(): Boolean {
         val permissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        return permissionGranted && manager.areNotificationsEnabled()
+        if (!permissionGranted || !manager.areNotificationsEnabled()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = context.getSystemService(NotificationManager::class.java)
+                .getNotificationChannel(CHANNEL_ID)
+            if (channel != null && channel.importance == NotificationManager.IMPORTANCE_NONE) return false
+        }
+        return true
     }
 
     private fun renderKey(state: TunnelRuntimeState, nowMillis: Long): String {
@@ -119,6 +135,7 @@ class TunnelNotificationController(private val context: Context) {
             append(session.status).append('|')
             append(session.expiresAtMillis).append('|')
             append(state.overrideScope?.takeIf { it.sessionId == session.id }?.surface).append('|')
+            append(configurationRenderKey()).append('|')
             append(progressBucket(state, nowMillis)).append('|')
             when (prompt) {
                 is TunnelPrompt.Intervention -> append("intervention:").append(prompt.surface)
@@ -144,10 +161,14 @@ class TunnelNotificationController(private val context: Context) {
         val detourSurface = state.overrideScope?.takeIf { it.sessionId == session.id }?.surface
         val intervention = (state.prompt as? TunnelPrompt.Intervention)?.takeIf { it.sessionId == session.id }
         val checkIn = (state.prompt as? TunnelPrompt.IntentionCheckIn)?.takeIf { it.sessionId == session.id }
+        val purposeChange = (state.prompt as? TunnelPrompt.PurposeGate)?.takeIf {
+            it.replacingSessionId == session.id
+        }
 
         val purpose = notificationTaskLabel(session.task)
         val contextLine = when {
-            expired -> "Time complete"
+            expired -> "Choose what to do next"
+            purposeChange != null -> "Choosing a new purpose"
             detourSurface != null -> "${surfaceLabel(detourSurface)} allowed temporarily"
             intervention != null -> "${surfaceLabel(intervention.surface)} is outside this tunnel"
             checkIn?.kind == IntentionCheckInKind.DETOUR_RENEWAL -> "Temporary detour check-in"
@@ -156,6 +177,7 @@ class TunnelNotificationController(private val context: Context) {
         }
         val collapsedStatus = when {
             expired -> "Time complete · Choose what to do next"
+            purposeChange != null -> "Choosing a new purpose"
             detourSurface != null -> "${surfaceLabel(detourSurface)} allowed temporarily"
             intervention != null -> "${surfaceLabel(intervention.surface)} is outside this tunnel"
             checkIn?.kind == IntentionCheckInKind.DETOUR_RENEWAL -> "Temporary detour check-in"
@@ -164,10 +186,7 @@ class TunnelNotificationController(private val context: Context) {
             else -> "Tunnel active"
         }
 
-        val iconSizePx = (APP_ICON_DP * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
-        val largeIcon = runCatching {
-            context.packageManager.getApplicationIcon(session.app.packageName).toBitmap(iconSizePx, iconSizePx)
-        }.getOrNull()
+        val largeIcon = appIcon(session.app.packageName)
 
         val collapsed = buildCollapsedView(
             state = state,
@@ -274,7 +293,7 @@ class TunnelNotificationController(private val context: Context) {
         val session = requireNotNull(state.activeSession)
         val checkIn = (state.prompt as? TunnelPrompt.IntentionCheckIn)?.takeIf { it.sessionId == session.id }
         val expired = session.status == TunnelStatus.EXPIRED || state.prompt is TunnelPrompt.SessionExpired
-        val showContinue = expired || checkIn?.kind == IntentionCheckInKind.OPEN_ENDED_BROWSE
+        val showContinue = expired || checkIn != null
 
         return RemoteViews(context.packageName, R.layout.notification_tunnel_expanded).apply {
             setTextViewText(R.id.notification_purpose, notificationTaskLabel(session.task))
@@ -317,6 +336,10 @@ class TunnelNotificationController(private val context: Context) {
                     actionPendingIntent(ACTION_CONTINUE, session.id, REQUEST_CONTINUE),
                 )
             }
+            setTextViewText(
+                R.id.notification_change_purpose,
+                if (showContinue) "Change" else "Change purpose",
+            )
             setOnClickPendingIntent(
                 R.id.notification_change_purpose,
                 actionPendingIntent(ACTION_CHANGE_PURPOSE, session.id, REQUEST_CHANGE_PURPOSE),
@@ -354,6 +377,25 @@ class TunnelNotificationController(private val context: Context) {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+    }
+
+    private fun appIcon(packageName: String): Bitmap? {
+        val densityDpi = context.resources.displayMetrics.densityDpi
+        if (cachedIconPackage == packageName && cachedIconDensityDpi == densityDpi) return cachedAppIcon
+        val iconSizePx = (APP_ICON_DP * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
+        val bitmap = runCatching {
+            context.packageManager.getApplicationIcon(packageName).toBitmap(iconSizePx, iconSizePx)
+        }.getOrNull()
+        cachedIconPackage = packageName
+        cachedIconDensityDpi = densityDpi
+        cachedAppIcon = bitmap
+        return bitmap
+    }
+
+    private fun configurationRenderKey(): String {
+        val configuration = context.resources.configuration
+        val nightMode = configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        return "$nightMode:${configuration.fontScale}:${context.resources.displayMetrics.densityDpi}"
     }
 
     private fun Long?.orZero(): Long = this ?: 0L

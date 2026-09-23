@@ -304,8 +304,13 @@ object YouTubeSurfaceDetector {
                 .mapNotNull { it.youtubeSubscriptionState }
                 .toSet()
             if (nearStates.size > 1) return null
+            return firstState
         }
-        return firstState
+
+        // Without vertical evidence we cannot tell the current creator control from a
+        // recommendation control. Only accept the result when every visible candidate agrees.
+        val statesWithoutPosition = candidates.mapNotNull { it.youtubeSubscriptionState }.toSet()
+        return statesWithoutPosition.singleOrNull()
     }
 
     private fun subscriptionSignal(

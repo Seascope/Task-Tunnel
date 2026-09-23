@@ -89,10 +89,10 @@ class DriftDetector(
             .takeLast(policy.maxTransitions)
         val existingEpisode = currentEpisode
         val episode = if (existingEpisode != null) {
-            existingEpisode.copy(
-                involvedPackages = (existingEpisode.involvedPackages + packageName).distinct(),
-                latestTransitionAtMillis = nowMillis,
-            )
+            // Freeze the episode at the exact threshold-crossing sequence. If showing the
+            // check-in is delayed by a higher-priority tunnel interaction, later app switches
+            // belong to the unresolved context, not to the episode that originally triggered.
+            existingEpisode
         } else {
             val distinctPackages = transitions.map { it.packageName }.distinct()
             if (distinctPackages.size >= policy.distinctAppThreshold) {
@@ -136,6 +136,11 @@ class DriftDetector(
     }
 
     private fun resetAfterQuietPeriod(nowMillis: Long) {
+        // Once a check-in is actually visible, keep its backing episode stable until the user
+        // responds or the service explicitly dismisses it. Otherwise a quiet period can clear the
+        // episode while the old overlay is still on screen, leaving stale buttons and allowing a
+        // second episode to form behind that overlay.
+        if (state.episode?.checkInShown == true) return
         val lastTransition = state.transitions.lastOrNull()?.observedAtMillis ?: return
         if (nowMillis - lastTransition >= policy.quietResetMillis) clear()
     }

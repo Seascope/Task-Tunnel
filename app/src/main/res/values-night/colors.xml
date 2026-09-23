@@ -2,6 +2,7 @@
 <resources>
     <color name="notification_text_primary">#FFF1F3F4</color>
     <color name="notification_text_secondary">#FFB7BCC4</color>
-    <color name="notification_action_background">#24FFFFFF</color>
+    <color name="notification_action_background">#2414345F</color>
+    <color name="notification_action_text">#FF8FBCFF</color>
     <color name="notification_progress_track">#30FFFFFF</color>
 </resources>

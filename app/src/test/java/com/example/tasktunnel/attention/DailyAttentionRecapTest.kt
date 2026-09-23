@@ -68,6 +68,15 @@ class DailyAttentionRecapTest {
     }
 
     @Test
+    fun driftDecisionWithoutTodayCheckInDoesNotCreateTodayEpisode() {
+        val events = listOf(
+            drift(today + 1, "yesterday-drift", AttentionSubtype.KEEP_GOING),
+        )
+
+        assertEquals(0, recap(events).driftEpisodes)
+    }
+
+    @Test
     fun yesterdayEventsAreExcluded() {
         val yesterday = LocalCalendarDay.forInstant(today, zone).startMillis - 1
         val events = listOf(intent(yesterday, "old"), drift(yesterday, "old-drift", AttentionSubtype.DRIFT_CHECK_IN))
@@ -129,8 +138,13 @@ class DailyAttentionRecapTest {
 
     private fun drift(time: Long, driftId: String, subtype: AttentionSubtype) = AttentionEvent(
         timestampMillis = time,
-        type = if (subtype == AttentionSubtype.DRIFT_SEQUENCE) AttentionEventType.TRANSITION else AttentionEventType.INTERVENTION,
+        type = when (subtype) {
+            AttentionSubtype.DRIFT_SEQUENCE -> AttentionEventType.TRANSITION
+            AttentionSubtype.DRIFT_CHECK_IN -> AttentionEventType.INTERVENTION
+            else -> AttentionEventType.DECISION
+        },
         subtype = subtype,
         driftEpisodeId = driftId,
+        relatedApps = listOf(AttentionApp.INSTAGRAM, AttentionApp.REDDIT, AttentionApp.YOUTUBE),
     )
 }

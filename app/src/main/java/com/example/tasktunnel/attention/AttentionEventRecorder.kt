@@ -11,6 +11,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+
+internal object LocalHistoryWriteGate {
+    private val mutex = Mutex()
+
+    suspend fun <T> runExclusive(block: suspend () -> T): T {
+        mutex.lock()
+        return try {
+            block()
+        } finally {
+            mutex.unlock()
+        }
+    }
+}
 
 /** Pure semantic filtering. It never receives accessibility nodes or detector diagnostics. */
 class AttentionEventSemantics {
@@ -152,6 +166,12 @@ class AttentionEventSemantics {
         relatedPackages = episode.involvedPackages.distinct(),
     )
 
+    fun reset() {
+        lastSurfaceByTunnel.clear()
+        shownInterventions.clear()
+        shownDriftEpisodes.clear()
+    }
+
     companion object {
         private val meaningfulSurfaces = setOf(
             DetectedSurface.INSTAGRAM_MESSAGES,
@@ -181,6 +201,7 @@ class AttentionEventRecorder(
     private val scope: CoroutineScope,
     private val semantics: AttentionEventSemantics = AttentionEventSemantics(),
 ) {
+    @Volatile private var historyGeneration = 0L
     fun purposeSelected(session: TunnelSession, nowMillis: Long) = enqueue(semantics.purposeSelected(session, nowMillis))
 
     fun surfaceObserved(session: TunnelSession, surface: DetectedSurface, nowMillis: Long) =
@@ -208,8 +229,18 @@ class AttentionEventRecorder(
         nowMillis: Long,
     ) = enqueue(semantics.driftDecision(episode, subtype, decision, foregroundPackage, nowMillis))
 
+    fun onHistoryCleared() {
+        historyGeneration += 1
+        semantics.reset()
+    }
+
     private fun enqueue(event: AttentionEvent) {
-        scope.launch { store.record(event) }
+        val generation = historyGeneration
+        scope.launch {
+            LocalHistoryWriteGate.runExclusive {
+                if (generation == historyGeneration) store.record(event)
+            }
+        }
     }
 }
 

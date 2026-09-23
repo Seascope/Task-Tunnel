@@ -37,7 +37,11 @@ import com.example.tasktunnel.onboarding.OnboardingPreferences
 import com.example.tasktunnel.onboarding.OnboardingProgress
 import com.example.tasktunnel.onboarding.OnboardingStep
 import com.example.tasktunnel.notification.TunnelNotificationPreferences
+import com.example.tasktunnel.notification.TunnelNotificationController
 import com.example.tasktunnel.protection.DeveloperDiagnosticsGate
+import com.example.tasktunnel.protection.ProtectionHealth
+import com.example.tasktunnel.protection.ProtectionLevel
+import com.example.tasktunnel.protection.ProtectionMasterPreferences
 import com.example.tasktunnel.protection.ProtectionSnapshotFactory
 import com.example.tasktunnel.ui.AccessibilityDisclosureScreen
 import com.example.tasktunnel.ui.AttentionScreen
@@ -91,16 +95,22 @@ class MainActivity : ComponentActivity() {
                     DriftAppCatalog.installedLaunchableApps(this@MainActivity)
                 }
                 var intentionalCheckInsEnabled by remember { mutableStateOf(IntentionalCheckInPreferences.load(this@MainActivity)) }
+                var protectionEnabled by remember { mutableStateOf(ProtectionMasterPreferences.load(this@MainActivity)) }
                 var showNotificationOffer by remember { mutableStateOf(false) }
-                LaunchedEffect(onboarding.completed, notificationControlsEnabled) {
-                    if (
+                val notificationPermissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                    ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.POST_NOTIFICATIONS,
+                    ) == PackageManager.PERMISSION_GRANTED
+                LaunchedEffect(onboarding.completed, notificationPermissionGranted, protectionEnabled) {
+                    // Only offer the runtime permission here. A user-disabled app/channel setting is
+                    // an explicit system preference and should be repaired from Settings, not nagged
+                    // by the first-run permission dialog.
+                    showNotificationOffer = protectionEnabled &&
                         onboarding.completed &&
                         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                        !notificationControlsEnabled &&
+                        !notificationPermissionGranted &&
                         !TunnelNotificationPreferences.wasPermissionOffered(this@MainActivity)
-                    ) {
-                        showNotificationOffer = true
-                    }
                 }
                 if (showNotificationOffer) {
                     AlertDialog(
@@ -109,7 +119,7 @@ class MainActivity : ComponentActivity() {
                             showNotificationOffer = false
                         },
                         title = { Text("Control active tunnels from notifications") },
-                        text = { Text("Refocus, change purpose, or end a tunnel directly from the notification shade.") },
+                        text = { Text("Continue check-ins, change purpose, or end a tunnel directly from the notification shade.") },
                         confirmButton = {
                             TextButton(onClick = {
                                 TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
@@ -135,7 +145,7 @@ class MainActivity : ComponentActivity() {
                     DriftPoolPreferences.save(this@MainActivity, selectedDriftPackages)
                     AccessibilityRuntime.setDriftPool(selectedDriftPackages)
                 }
-                val setDriftEnabled: (Boolean) -> Unit = { enabled ->
+                val setDriftEnabled: (Boolean) -> Boolean = { enabled ->
                     selectedDriftPackages = if (enabled) {
                         DriftPoolPreferences.restoreSelection(this@MainActivity)
                     } else {
@@ -143,6 +153,14 @@ class MainActivity : ComponentActivity() {
                     }
                     DriftPoolPreferences.save(this@MainActivity, selectedDriftPackages)
                     AccessibilityRuntime.setDriftPool(selectedDriftPackages)
+                    !enabled || selectedDriftPackages.isNotEmpty()
+                }
+                val setProtectionEnabled: (Boolean) -> Unit = { enabled ->
+                    protectionEnabled = enabled
+                    ProtectionMasterPreferences.save(this@MainActivity, enabled)
+                    if (!enabled) showNotificationOffer = false
+                    AccessibilityRuntime.setProtectionEnabled(enabled)
+                    homeViewModel.refresh()
                 }
                 val openAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
                 val snapshot = remember(
@@ -159,6 +177,16 @@ class MainActivity : ComponentActivity() {
                         runtime,
                         selectedDriftPackages,
                         attention.historyAvailable,
+                    )
+                }
+
+                val displayHealth = if (protectionEnabled) {
+                    snapshot.health
+                } else {
+                    ProtectionHealth(
+                        level = ProtectionLevel.OFF,
+                        title = "Protection paused",
+                        summary = "Task Tunnel services are turned off. Your settings are preserved.",
                     )
                 }
 
@@ -229,11 +257,19 @@ class MainActivity : ComponentActivity() {
                                 if (destination == MainDestination.HOME) {
                                     HomeScreen(
                                         uiState = home,
-                                        health = snapshot.health,
+                                        health = displayHealth,
                                         refresh = homeViewModel::refresh,
                                         turnProtectionOn = {
-                                            disclosureReturn = MainDestination.HOME
-                                            destination = MainDestination.DISCLOSURE
+                                            if (!protectionEnabled) {
+                                                setProtectionEnabled(true)
+                                                if (!serviceEnabled) {
+                                                    disclosureReturn = MainDestination.HOME
+                                                    destination = MainDestination.DISCLOSURE
+                                                }
+                                            } else {
+                                                disclosureReturn = MainDestination.HOME
+                                                destination = MainDestination.DISCLOSURE
+                                            }
                                         },
                                         modifier = contentModifier,
                                     )
@@ -241,7 +277,7 @@ class MainActivity : ComponentActivity() {
                                     AttentionScreen(
                                         uiState = attention,
                                         runtime = runtime,
-                                        health = snapshot.health,
+                                        health = displayHealth,
                                         openEpisode = { selectedEpisodeId = it.id; destination = MainDestination.EPISODE },
                                         reviewProtection = {
                                             destination = MainDestination.PROTECTION
@@ -254,12 +290,15 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     ProtectionScreen(
                                         snapshot = snapshot,
+                                        protectionEnabled = protectionEnabled,
+                                        setProtectionEnabled = setProtectionEnabled,
                                         selectedDriftPackages = selectedDriftPackages,
                                         availableDriftApps = availableDriftApps,
                                         intentionalCheckInsEnabled = intentionalCheckInsEnabled,
                                         setIntentionalCheckInsEnabled = {
                                             intentionalCheckInsEnabled = it
                                             IntentionalCheckInPreferences.save(this@MainActivity, it)
+                                            AccessibilityRuntime.setIntentionalCheckInsEnabled(it)
                                         },
                                         setDriftEnabled = setDriftEnabled,
                                         setDriftAppEnabled = setDriftAppEnabled,
@@ -282,20 +321,35 @@ class MainActivity : ComponentActivity() {
                                 historyAvailable = attention.historyAvailable,
                                 notificationControlsEnabled = notificationControlsEnabled,
                                 configureNotificationControls = {
+                                    val permissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                                        ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                                    val appNotificationsEnabled = permissionGranted &&
+                                        NotificationManagerCompat.from(this@MainActivity).areNotificationsEnabled()
                                     if (
                                         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                        ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
-                                        !TunnelNotificationPreferences.wasPermissionOffered(this@MainActivity)
+                                        !permissionGranted
                                     ) {
+                                        // The "offered" bit only suppresses the unsolicited first-run
+                                        // prompt. An explicit tap in Settings should always be allowed
+                                        // to request notification permission again.
                                         TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
                                         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && appNotificationsEnabled) {
+                                        TunnelNotificationController(this@MainActivity).ensureChannel()
+                                        startActivity(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                                            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                                            putExtra(Settings.EXTRA_CHANNEL_ID, TunnelNotificationController.CHANNEL_ID)
+                                        })
                                     } else {
                                         startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                                             putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
                                         })
                                     }
                                 },
-                                clearHistory = attentionViewModel::clearHistory,
+                                clearHistory = {
+                                    AccessibilityRuntime.onAttentionHistoryCleared()
+                                    attentionViewModel.clearHistory()
+                                },
                                 openDiagnostics = { destination = MainDestination.DIAGNOSTICS },
                                 openDisclosure = {
                                     disclosureReturn = MainDestination.SETTINGS
@@ -353,9 +407,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshNotificationState() {
-        val permissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        notificationControlsEnabled = permissionGranted && NotificationManagerCompat.from(this).areNotificationsEnabled()
+        notificationControlsEnabled = TunnelNotificationPreferences.controlsEnabled(this)
     }
 
     private fun refreshAccessibilityState() {

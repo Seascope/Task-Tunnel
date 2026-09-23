@@ -65,6 +65,9 @@ interface AttentionEventDao {
     @Query("SELECT * FROM attention_events ORDER BY timestampMillis DESC, id DESC LIMIT :limit")
     fun observeRecent(limit: Int): Flow<List<AttentionEventEntity>>
 
+    @Query("SELECT * FROM attention_events WHERE timestampMillis >= :sinceMillis ORDER BY timestampMillis ASC, id ASC")
+    fun observeSince(sinceMillis: Long): Flow<List<AttentionEventEntity>>
+
     @Query("SELECT * FROM attention_events ORDER BY timestampMillis ASC, id ASC")
     suspend fun getAll(): List<AttentionEventEntity>
 
@@ -117,6 +120,9 @@ interface AttentionEventStore {
 class AttentionEventRepository(private val dao: AttentionEventDao) : AttentionEventStore {
     override fun observeRecent(limit: Int): Flow<List<AttentionEvent>> =
         dao.observeRecent(limit).map { rows -> rows.map(AttentionEventEntity::toDomain).reversed() }
+
+    fun observeSince(sinceMillis: Long): Flow<List<AttentionEvent>> =
+        dao.observeSince(sinceMillis).map { rows -> rows.map(AttentionEventEntity::toDomain) }
 
     override suspend fun record(event: AttentionEvent) {
         dao.insert(event.toEntity())

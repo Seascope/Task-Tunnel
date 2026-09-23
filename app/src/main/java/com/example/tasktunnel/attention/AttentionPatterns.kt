@@ -32,6 +32,8 @@ data class AttentionPattern(
     val task: TunnelTask? = null,
     val surface: DetectedSurface? = null,
     val sequence: List<AttentionApp> = emptyList(),
+    /** Exact package path so recurring Drift works for arbitrary user-selected apps too. */
+    val packageSequence: List<String> = emptyList(),
     val timeBucket: DriftTimeBucket? = null,
     val evidenceCount: Int,
     val sampleSize: Int,
@@ -165,13 +167,14 @@ object AttentionPatternAnalyzer {
 
     private fun recurringDriftPatterns(episodes: List<AttentionEpisode>): List<AttentionPattern> = episodes
         .asSequence()
-        .filter { it.type == AttentionEpisodeType.DRIFT && it.involvedApps.size >= 2 }
-        .groupBy { it.involvedApps }
-        .mapNotNull { (sequence, matching) ->
+        .filter { it.type == AttentionEpisodeType.DRIFT && it.involvedPackages.size >= 3 }
+        .groupBy { it.involvedPackages }
+        .mapNotNull { (packageSequence, matching) ->
             if (matching.size < MIN_DRIFT_PATH_OBSERVATIONS) return@mapNotNull null
             AttentionPattern(
                 type = AttentionPatternType.RECURRING_DRIFT_PATH,
-                sequence = sequence,
+                sequence = packageSequence.mapNotNull(AttentionApp::fromPackage),
+                packageSequence = packageSequence,
                 evidenceCount = matching.size,
                 sampleSize = matching.size,
                 latestEvidenceMillis = matching.maxOf(AttentionEpisode::startedAtMillis),
@@ -288,7 +291,13 @@ private object ReviewTeaserFactory {
 fun patternHeadline(pattern: AttentionPattern): String = when (pattern.type) {
     AttentionPatternType.COMMON_DETOUR_SURFACE -> "${surfaceLabel(pattern.surface)} is your most common ${pattern.app?.displayName ?: "app"} detour."
     AttentionPatternType.RECOVERY_AFTER_SURFACE -> "You usually return after ${surfaceLabel(pattern.surface)}."
-    AttentionPatternType.RECURRING_DRIFT_PATH -> "${pattern.sequence.joinToString(" → ") { it.displayName }} is a recurring Drift path."
+    AttentionPatternType.RECURRING_DRIFT_PATH -> if (
+        pattern.sequence.isNotEmpty() && pattern.sequence.size == pattern.packageSequence.size
+    ) {
+        "${pattern.sequence.joinToString(" → ") { it.displayName }} is a recurring Drift path."
+    } else {
+        "A recurring Drift path keeps showing up."
+    }
     AttentionPatternType.TIME_OF_DAY_DRIFT -> "Most of your Drift episodes happen in the ${pattern.timeBucket?.label}."
 }
 

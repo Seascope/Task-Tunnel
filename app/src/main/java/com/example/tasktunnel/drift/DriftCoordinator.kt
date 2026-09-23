@@ -31,6 +31,17 @@ class DriftCoordinator(
 
     fun markCheckInShown(episodeId: String) = detector.markCheckInShown(episodeId)
 
+    /**
+     * A shown accessibility overlay can disappear because the user leaves the selected Drift
+     * pool or a higher-priority Tunnel interaction takes over. Treat that as an implicit
+     * dismissal so a shown-but-unresolved episode cannot permanently suppress future check-ins.
+     * No Attention decision is recorded because the user did not press a Drift action.
+     */
+    fun dismissShownCheckIn(nowMillis: Long) {
+        val shownEpisode = detector.state.episode?.takeIf { it.checkInShown && !it.acknowledged } ?: return
+        detector.acknowledge(shownEpisode.id, nowMillis)
+    }
+
     fun keepGoing(episodeId: String, nowMillis: Long) = detector.acknowledge(episodeId, nowMillis)
 
     fun setAnIntention(episodeId: String, nowMillis: Long): SupportedApp? {
