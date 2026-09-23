@@ -32,8 +32,6 @@ import com.example.tasktunnel.accessibility.AccessibilityRuntime
 import com.example.tasktunnel.attention.AttentionViewModel
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.drift.DriftPoolPreferences
-import com.example.tasktunnel.feedback.FeedbackSender
-import com.example.tasktunnel.feedback.FeedbackStatusReport
 import com.example.tasktunnel.onboarding.OnboardingFlow
 import com.example.tasktunnel.onboarding.OnboardingPreferences
 import com.example.tasktunnel.onboarding.OnboardingProgress
@@ -51,7 +49,6 @@ import com.example.tasktunnel.ui.AttentionScreen
 import com.example.tasktunnel.ui.DeveloperScreen
 import com.example.tasktunnel.ui.DiagnosticsScreen
 import com.example.tasktunnel.ui.EpisodeDetailScreen
-import com.example.tasktunnel.ui.FeedbackScreen
 import com.example.tasktunnel.ui.InspectorScreen
 import com.example.tasktunnel.ui.OnboardingScreen
 import com.example.tasktunnel.ui.PrimaryDestination
@@ -245,7 +242,6 @@ class MainActivity : ComponentActivity() {
                             MainDestination.REVIEW -> MainDestination.REVIEW
                             MainDestination.SETTINGS -> lastPrimary
                             MainDestination.DIAGNOSTICS -> MainDestination.SETTINGS
-                            MainDestination.FEEDBACK -> MainDestination.SETTINGS
                             MainDestination.DISCLOSURE -> disclosureReturn
                             MainDestination.DEVELOPER -> MainDestination.SETTINGS
                             MainDestination.INSPECTOR -> MainDestination.DEVELOPER
@@ -384,26 +380,7 @@ class MainActivity : ComponentActivity() {
                                     disclosureReturn = MainDestination.SETTINGS
                                     destination = MainDestination.DISCLOSURE
                                 },
-                                openFeedback = { destination = MainDestination.FEEDBACK },
                                 openDeveloper = { destination = MainDestination.DEVELOPER },
-                                modifier = it,
-                            )
-                        }
-                        MainDestination.FEEDBACK -> SecondaryScaffold("Send feedback", { destination = MainDestination.SETTINGS }) {
-                            val feedbackStatus = FeedbackStatusReport(
-                                appVersion = BuildConfig.VERSION_NAME,
-                                androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                                accessibilityEnabled = serviceEnabled,
-                                protectionEnabled = protectionEnabled,
-                                driftEnabled = selectedDriftPackages.isNotEmpty(),
-                                notificationControlsEnabled = notificationControlsEnabled,
-                            )
-                            FeedbackScreen(
-                                statusReport = feedbackStatus,
-                                feedbackConfigured = BuildConfig.FEEDBACK_FORM_ID.isNotBlank(),
-                                sendFeedback = { draft ->
-                                    FeedbackSender.submit(BuildConfig.FEEDBACK_FORM_ID, draft, feedbackStatus)
-                                },
                                 modifier = it,
                             )
                         }
@@ -414,6 +391,7 @@ class MainActivity : ComponentActivity() {
                             AccessibilityDisclosureScreen(
                                 accessEnabled = serviceEnabled,
                                 continueToSettings = { destination = disclosureReturn; openAccessibilitySettings() },
+                                decline = { destination = disclosureReturn },
                                 modifier = it,
                             )
                         }
@@ -473,7 +451,6 @@ private enum class MainDestination {
     EPISODE,
     PROTECTION,
     SETTINGS,
-    FEEDBACK,
     DIAGNOSTICS,
     DISCLOSURE,
     DEVELOPER,

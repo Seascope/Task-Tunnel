@@ -1,5 +1,7 @@
 <resources>
     <string name="app_name">Task Tunnel</string>
     <string name="accessibility_service_label">Task Tunnel protection</string>
-    <string name="accessibility_service_description">Recognizes supported Instagram and YouTube surfaces to protect a purpose you choose. Processing stays on this device.</string>
+    <string name="accessibility_service_summary">Protects the purpose you choose inside supported apps.</string>
+    <string name="accessibility_service_intro">Task Tunnel uses Accessibility to recognize broad app surfaces and detect Drift. On-screen interface information is processed on-device and is not stored as content.</string>
+    <string name="accessibility_service_description">Recognizes broad surfaces in Instagram, YouTube, and TikTok to protect a purpose you choose. Accessibility processing stays on this device.</string>
 </resources>

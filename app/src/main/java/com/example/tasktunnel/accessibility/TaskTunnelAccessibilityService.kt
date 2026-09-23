@@ -1423,14 +1423,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         } else {
             null
         }
-        val rememberedDurations = if (prompt.replacingSessionId == null) {
-            purposeChoices(prompt.app).mapNotNull { choice ->
-                rememberedDurationChoice(choice.task)?.let { choice.task to it }
-            }.toMap()
+        val rememberedDurationForLastPurpose = if (prompt.replacingSessionId == null) {
+            lastPurpose?.let(::rememberedDurationChoice)
         } else {
-            emptyMap()
+            null
         }
-        val initialRememberedDuration = lastPurpose?.let { rememberedDurations[it] }
         val durationForStart = { task: TunnelTask ->
             when {
                 prompt.replacingSessionId != null && !durationWasChanged -> {
@@ -1440,19 +1437,18 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                         ?.let { (it - System.currentTimeMillis()).coerceAtLeast(1L) }
                 }
                 durationWasChanged -> selectedDurationMillis
-                rememberedDurations.containsKey(task) -> rememberedDurations.getValue(task).durationMillis
+                task == lastPurpose && rememberedDurationForLastPurpose != null -> {
+                    rememberedDurationForLastPurpose.durationMillis
+                }
                 else -> selectedDurationMillis
             }
         }
         addView(purposeGateAppIdentity(prompt.app))
         addView(purposeGateQuestion())
-        val durationSelector = purposeDurationSelector().apply {
-            initialRememberedDuration?.let { selectDuration(it.durationMillis) }
-        }
+        val durationSelector = purposeDurationSelector()
         val durationValue = TextView(context).apply {
             text = when {
                 prompt.preservedDurationMillis != null -> formatRemainingDuration(prompt.preservedDurationMillis)
-                rememberedDurations.isNotEmpty() -> "By purpose"
                 else -> DURATION_CHOICES.first().label
             }
             textSize = 14f
@@ -1469,7 +1465,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     title = choice.title,
                     subtitle = choice.subtitle,
                     lastUsed = choice.task == lastPurpose,
-                    rememberedDurationLabel = rememberedDurations[choice.task]?.label,
+                    rememberedDurationLabel = rememberedDurationForLastPurpose
+                        ?.takeIf { choice.task == lastPurpose }
+                        ?.label,
                 ) { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     startTunnel(
@@ -1633,19 +1631,16 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val surface = prompt.surface?.let(::surfaceLabel)
         addView(overlayAppIdentity(app))
         if (prompt.kind == IntentionCheckInKind.DETOUR_RENEWAL) {
-            addView(overlayText(
-                when (prompt.surface) {
-                    DetectedSurface.INSTAGRAM_EXPLORE -> "Still exploring intentionally?"
-                    else -> "Still watching intentionally?"
-                },
-                heading = true,
-            ))
+            addView(overlayText(detourCheckInHeading(prompt.surface), heading = true))
             addView(overlayText("You chose to spend a few minutes in ${surface ?: "this screen"}.", secondary = true))
             addView(overlayPrimaryButton(returnLabel(prompt.task)) {
                 if (tunnelCoordinator.state.prompt != prompt) return@overlayPrimaryButton
                 val nowMillis = System.currentTimeMillis()
                 val directedDestination = prompt.task.hasDirectedDestination()
-                if (tunnelCoordinator.returnFromCheckIn(nowMillis, addReturnCooldown = !directedDestination)) {
+                // Keep the same stale-surface cooldown used by normal intervention returns.
+                // Without it, a capture from the detour can recreate an intervention during the
+                // overlay-dismiss delay and abort the directed navigation.
+                if (tunnelCoordinator.returnFromCheckIn(nowMillis, addReturnCooldown = true)) {
                     session?.let {
                         attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_RETURN, AttentionDecision.CHECK_IN_RETURN, nowMillis, prompt.surface)
                     }
@@ -1657,7 +1652,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     }
                 }
             })
-            addView(overlayTextButton(if (prompt.surface == DetectedSurface.INSTAGRAM_EXPLORE) "Keep exploring" else "Keep watching") {
+            addView(overlayTextButton(detourCheckInContinueLabel(prompt.surface)) {
                 if (tunnelCoordinator.state.prompt != prompt) return@overlayTextButton
                 session?.let {
                     attentionRecorder.tunnelDecision(it, AttentionSubtype.CHECK_IN_CONTINUE, AttentionDecision.CHECK_IN_CONTINUE, System.currentTimeMillis(), prompt.surface)
@@ -1701,6 +1696,30 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 updateTunnelUi()
             })
         }
+    }
+
+    private fun detourCheckInHeading(surface: DetectedSurface?): String = when (surface) {
+        DetectedSurface.INSTAGRAM_EXPLORE -> "Still exploring intentionally?"
+        DetectedSurface.INSTAGRAM_REELS,
+        DetectedSurface.YOUTUBE_VIDEO,
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
+        DetectedSurface.YOUTUBE_SHORTS,
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
+        DetectedSurface.TIKTOK_FEED,
+        -> "Still watching intentionally?"
+        else -> "Still here intentionally?"
+    }
+
+    private fun detourCheckInContinueLabel(surface: DetectedSurface?): String = when (surface) {
+        DetectedSurface.INSTAGRAM_EXPLORE -> "Keep exploring"
+        DetectedSurface.INSTAGRAM_REELS,
+        DetectedSurface.YOUTUBE_VIDEO,
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_VIDEO,
+        DetectedSurface.YOUTUBE_SHORTS,
+        DetectedSurface.YOUTUBE_UNSUBSCRIBED_SHORTS,
+        DetectedSurface.TIKTOK_FEED,
+        -> "Keep watching"
+        else -> "Stay here"
     }
 
     private fun chooseInterventionVariant(prompt: TunnelPrompt.Intervention): InterventionVariant {

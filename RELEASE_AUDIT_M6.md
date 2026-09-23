@@ -7,10 +7,10 @@ Audit date: 20 September 2026. Scope: repository configuration and beta-readines
 - SDK: compile/target API 37, above the dossier's API 36-or-higher submission baseline; minimum API 24.
 - Identity: `applicationId` and namespace are `com.example.tasktunnel`. This is a publication blocker because it is placeholder-like.
 - Version: `versionCode 1`, `versionName 1.0`; a human must confirm final release numbering.
-- Components: launcher activity exported as required by its intent filter; AccessibilityService not exported and protected by `BIND_ACCESSIBILITY_SERVICE`.
+- Components: launcher activity exported as required by its intent filter; AccessibilityService exported for Android system discovery and protected by `BIND_ACCESSIBILITY_SERVICE`.
 - Service metadata: content retrieval, relevant events, feedback type, settings activity, view-ID reporting, and no gesture/filter-key request are declared.
 - Visibility: fixed `<queries>` entries for Instagram, YouTube, and official Reddit; no `QUERY_ALL_PACKAGES`.
-- Permissions: Internet permission is present only for explicit in-app feedback submission; no dangerous runtime permission declarations were added for feedback.
+- Permissions: no Internet permission is declared. The only runtime permission requested by the app is notifications on Android versions that require it.
 - Privacy: Attention stores structured semantic events only. Database/WAL/SHM and Task Tunnel preference files are excluded from backup and device transfer. No screenshots, accessibility text, raw tree, or fingerprint is persisted by the production path.
 - UI separation: normal diagnostics are an explicit sanitized schema. Inspector, fingerprint copy, confidence, package transitions, resource IDs, and node details require `BuildConfig.DEBUG`; release routing falls back to production-safe diagnostics.
 - Logging: no app-source `Log`, `println`, or stack-trace output found.

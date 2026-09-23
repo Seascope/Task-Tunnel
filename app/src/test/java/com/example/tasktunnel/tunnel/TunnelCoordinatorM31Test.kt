@@ -245,6 +245,153 @@ class TunnelCoordinatorM31Test {
     }
 
     @Test
+    fun visibleBrowseCheckInSurvivesQuickAppSwitchWithoutConsumingAnotherSlot() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "browse-session" },
+            quickReturnGraceMillis = 500,
+            browseCheckInIntervalMillis = 100,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_BROWSE, 1))
+
+        coordinator.advanceTime(101)
+        assertEquals(1, (coordinator.state.prompt as TunnelPrompt.IntentionCheckIn).shownCount)
+
+        coordinator.observeForeground("com.example.other", 110)
+        assertNull(coordinator.state.prompt)
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 130)
+
+        val restored = coordinator.state.prompt as TunnelPrompt.IntentionCheckIn
+        assertEquals(IntentionCheckInKind.OPEN_ENDED_BROWSE, restored.kind)
+        assertEquals(1, restored.shownCount)
+    }
+
+    @Test
+    fun detourRenewalSurvivesVisitingAllowedSurface() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "session-1" },
+            allowAnywayDurationMillis = 100,
+            detourRenewalExtensionMillis = 200,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_MESSAGES, 1))
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
+        coordinator.allowAnyway(10)
+
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_MESSAGES, 50)
+        assertEquals(DetectedSurface.INSTAGRAM_REELS, coordinator.state.checkIn?.surface)
+        coordinator.advanceTime(110)
+        assertNull(coordinator.state.prompt)
+
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 120)
+
+        val prompt = coordinator.state.prompt as TunnelPrompt.IntentionCheckIn
+        assertEquals(IntentionCheckInKind.DETOUR_RENEWAL, prompt.kind)
+        assertEquals(DetectedSurface.INSTAGRAM_REELS, prompt.surface)
+    }
+
+    @Test
+    fun detourRenewalPausesDuringQuickExternalAppSwitch() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "session-1" },
+            allowAnywayDurationMillis = 100,
+            quickReturnGraceMillis = 500,
+            detourRenewalExtensionMillis = 200,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_MESSAGES, 1))
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
+        coordinator.allowAnyway(10)
+
+        coordinator.observeForeground("com.example.other", 50)
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 80)
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 80)
+
+        assertEquals(140L, coordinator.state.checkIn?.nextCheckAtMillis)
+        assertEquals(140L, coordinator.state.overrideScope?.expiresAtMillis)
+        coordinator.advanceTime(139)
+        assertNull(coordinator.state.prompt)
+        coordinator.advanceTime(140)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.IntentionCheckIn)
+    }
+
+    @Test
+    fun maxDetourCheckInsEndWithFiniteAllowanceThenRestoreIntervention() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "session-1" },
+            allowAnywayDurationMillis = 100,
+            detourRenewalExtensionMillis = 200,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_MESSAGES, 1))
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
+        coordinator.allowAnyway(10)
+
+        coordinator.advanceTime(110)
+        coordinator.continueCheckIn(110)
+        assertEquals(310L, coordinator.state.overrideScope?.expiresAtMillis)
+
+        coordinator.advanceTime(310)
+        coordinator.continueCheckIn(310)
+        assertTrue(coordinator.state.checkIn?.suppressed == true)
+        assertNull(coordinator.state.checkIn?.nextCheckAtMillis)
+        assertEquals(510L, coordinator.state.overrideScope?.expiresAtMillis)
+
+        coordinator.advanceTime(509)
+        assertNull(coordinator.state.prompt)
+        coordinator.advanceTime(510)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
+    }
+
+    @Test
+    fun suppressedDetourCheckInsStaySuppressedAfterAnotherAllowance() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "session-1" },
+            allowAnywayDurationMillis = 100,
+            detourRenewalExtensionMillis = 200,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_MESSAGES, 1))
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
+        coordinator.allowAnyway(10)
+
+        coordinator.advanceTime(110)
+        coordinator.continueCheckIn(110)
+        coordinator.advanceTime(310)
+        coordinator.continueCheckIn(310)
+        coordinator.advanceTime(510)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
+
+        coordinator.allowAnyway(510)
+        assertTrue(coordinator.state.checkIn?.suppressed == true)
+        assertNull(coordinator.state.checkIn?.nextCheckAtMillis)
+        assertEquals(810L, coordinator.state.overrideScope?.expiresAtMillis)
+
+        coordinator.advanceTime(810)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
+    }
+
+    @Test
+    fun returningFromDetourCheckInCanSuppressStaleSurfaceDuringDirectedReturn() {
+        val coordinator = TunnelCoordinator(
+            idFactory = { "session-1" },
+            allowAnywayDurationMillis = 100,
+            detourRenewalExtensionMillis = 200,
+        )
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 0)
+        assertTrue(coordinator.startSession(TunnelTask.INSTAGRAM_MESSAGES, 1))
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 10)
+        coordinator.allowAnyway(10)
+        coordinator.advanceTime(110)
+
+        assertTrue(coordinator.returnFromCheckIn(110, addReturnCooldown = true))
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 111)
+        assertNull(coordinator.state.prompt)
+        coordinator.observeSurface(DetectedSurface.INSTAGRAM_REELS, 2_111)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.Intervention)
+    }
+
+    @Test
     fun allowanceExpiryReintervenesWithoutAnotherAccessibilityEvent() {
         val coordinator = activeInstagram(duration = null)
         coordinator.setCheckInsEnabled(false)

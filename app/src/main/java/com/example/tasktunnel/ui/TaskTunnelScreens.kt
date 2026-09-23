@@ -35,7 +35,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -44,7 +43,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.alpha
@@ -72,10 +70,6 @@ import com.example.tasktunnel.attention.SevenDayReview
 import com.example.tasktunnel.attention.taskLabel
 import com.example.tasktunnel.attention.episodeStory
 import com.example.tasktunnel.drift.KnownDriftApp
-import com.example.tasktunnel.feedback.FeedbackCategory
-import com.example.tasktunnel.feedback.FeedbackDraft
-import com.example.tasktunnel.feedback.FeedbackStatusReport
-import com.example.tasktunnel.feedback.FeedbackSubmissionResult
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.onboarding.OnboardingProgress
 import com.example.tasktunnel.onboarding.OnboardingStep
@@ -93,7 +87,6 @@ import com.example.tasktunnel.ui.theme.LimitedAmber
 import com.example.tasktunnel.ui.theme.SurfaceRaised
 import com.example.tasktunnel.tunnel.TunnelSession
 import com.example.tasktunnel.ui.theme.TaskTunnelTokens
-import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -1119,7 +1112,7 @@ fun OnboardingScreen(
     val primaryLabel = when (progress.step) {
         OnboardingStep.VALUE -> "Get started"
         OnboardingStep.APPS -> "Continue"
-        OnboardingStep.ACCESSIBILITY -> if (accessibilityEnabled) "Continue" else "Enable permission"
+        OnboardingStep.ACCESSIBILITY -> if (accessibilityEnabled) "Agree & continue" else "Agree & open settings"
         OnboardingStep.DRIFT -> "Continue"
         OnboardingStep.TRY -> null
         OnboardingStep.READY -> "Start using Task Tunnel"
@@ -1133,7 +1126,7 @@ fun OnboardingScreen(
         OnboardingStep.VALUE,
         OnboardingStep.APPS,
         -> "Set up later"
-        OnboardingStep.ACCESSIBILITY -> if (accessibilityEnabled) null else "Set up later"
+        OnboardingStep.ACCESSIBILITY -> if (accessibilityEnabled) null else "Not now"
         OnboardingStep.DRIFT -> if (selectedDriftPackages.isEmpty()) "Skip for now" else null
         OnboardingStep.TRY -> "Try later"
         OnboardingStep.READY -> null
@@ -1277,13 +1270,13 @@ private fun SupportedAppSetupRow(app: InstalledAppStatus) {
 private fun AccessibilityOnboarding(accessibilityEnabled: Boolean) {
     Text("Let Task Tunnel notice where you are", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text(
-        "Android Accessibility lets Task Tunnel tell when you move between places like Messages, Reels, Search or Shorts so it can step in at the right moment.",
+        "Task Tunnel uses Android Accessibility to access app activity and on-screen interface information so it can recognize broad places like Messages, Reels, Search or Shorts and step in when your use no longer matches the purpose you chose.",
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 14.dp, bottom = 24.dp),
     )
-    SetupFact("Stays on your phone", "Screen recognition and Task Tunnel decisions run on this device.")
-    SetupFact("Private by design", "Task Tunnel does not store message contents, searches, titles, screenshots, or raw accessibility trees.")
+    SetupFact("Used only for Task Tunnel", "Accessibility information is processed on this device to recognize supported app surfaces, route you back when you choose to return, and detect Drift across apps you selected.")
+    SetupFact("Not sent or stored as content", "Task Tunnel does not send or store message contents, searches, titles, screenshots, usernames, or raw accessibility trees.")
     SetupFact("When unsure, it stays out of the way", "If Task Tunnel can't confidently tell where you are, it leaves you alone.")
     Spacer(Modifier.height(20.dp))
     val statusColor = if (accessibilityEnabled) HealthyGreen else LimitedAmber
@@ -1449,7 +1442,7 @@ private fun OnboardingPoint(index: String, title: String, body: String) {
 fun DisclosureContent() {
     Text("How Task Tunnel works on your phone", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text(
-        "Task Tunnel uses Android Accessibility so it can notice where you are inside supported apps and step in only when it needs to.",
+        "Task Tunnel uses Android Accessibility to access app activity and on-screen interface information needed to recognize broad places inside supported apps and step in only when it needs to.",
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 10.dp, bottom = 18.dp),
@@ -1458,7 +1451,7 @@ fun DisclosureContent() {
     DisclosureItem("Why", "This lets Task Tunnel notice when you move away from the purpose you chose, and when you rapidly hop between selected apps.")
     DisclosureItem("What stays private", "Task Tunnel does not keep screenshots, message contents, searches, video titles, usernames, raw screen text, or raw accessibility trees.")
     DisclosureItem("What is saved", "Your chosen purposes, Drift app choices, meaningful transitions, prompts and the choices you make are stored locally so Attention and Review can work.")
-    DisclosureItem("Where your data lives", "Protection and activity processing stay on this device. Feedback is sent only when you explicitly tap Send, and the form shows what will be included.")
+    DisclosureItem("Where your data lives", "Protection and activity processing stay on this device. Task Tunnel has no account, cloud sync, analytics upload, or remote detector service.")
 }
 
 @Composable
@@ -1473,7 +1466,7 @@ private fun DisclosureItem(title: String, body: String) {
 }
 
 @Composable
-fun AccessibilityDisclosureScreen(accessEnabled: Boolean, continueToSettings: () -> Unit, modifier: Modifier = Modifier) {
+fun AccessibilityDisclosureScreen(accessEnabled: Boolean, continueToSettings: () -> Unit, decline: () -> Unit, modifier: Modifier = Modifier) {
     LazyColumn(
         modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 14.dp),
@@ -1494,11 +1487,21 @@ fun AccessibilityDisclosureScreen(accessEnabled: Boolean, continueToSettings: ()
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            Text(
+                "By tapping Agree, you consent to Task Tunnel using Android Accessibility for the purposes described above.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 14.dp),
+            )
             Button(
                 onClick = continueToSettings,
                 modifier = Modifier.fillMaxWidth().padding(top = 14.dp).height(50.dp),
                 shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
-            ) { Text("Open Android settings") }
+            ) { Text(if (accessEnabled) "Agree & continue" else "Agree & open Android settings") }
+            TextButton(
+                onClick = decline,
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            ) { Text("Not now") }
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -1513,7 +1516,6 @@ fun SettingsScreen(
     clearHistory: () -> Unit,
     openDiagnostics: () -> Unit,
     openDisclosure: () -> Unit,
-    openFeedback: () -> Unit,
     openDeveloper: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1554,14 +1556,6 @@ fun SettingsScreen(
                 leading = { TaskTunnelIcon(TaskTunnelIconKind.INFO, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
                 showChevron = true,
                 onClick = openDisclosure,
-            )
-            RowDivider(inset = true)
-            SettingsRow(
-                title = "Send feedback",
-                subtitle = "Tell us what felt broken, confusing or worth improving",
-                leading = { TaskTunnelIcon(TaskTunnelIconKind.MESSAGE, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
-                showChevron = true,
-                onClick = openFeedback,
             )
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("Your data", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
@@ -1613,197 +1607,6 @@ fun SettingsScreen(
     }
 }
 
-@Composable
-fun FeedbackScreen(
-    statusReport: FeedbackStatusReport,
-    feedbackConfigured: Boolean,
-    sendFeedback: suspend (FeedbackDraft) -> FeedbackSubmissionResult,
-    modifier: Modifier = Modifier,
-) {
-    var category by remember { mutableStateOf<FeedbackCategory?>(null) }
-    var note by remember { mutableStateOf("") }
-    var includeStatus by remember { mutableStateOf(false) }
-    var sending by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<FeedbackSubmissionResult?>(null) }
-    val scope = rememberCoroutineScope()
-
-    val currentDraft = category?.let {
-        FeedbackDraft(
-            category = it,
-            note = note,
-            includeStatusReport = includeStatus,
-        )
-    }
-    val canSend = currentDraft != null && note.isNotBlank() && !sending
-
-    LazyColumn(
-        modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            horizontal = TaskTunnelTokens.ScreenHorizontalPadding,
-            vertical = 14.dp,
-        ),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        item {
-            Text(
-                "What should we know?",
-                style = MaterialTheme.typography.titleLarge,
-            )
-            Text(
-                "Tell us what happened in your own words. Your feedback is sent directly from Task Tunnel when you tap Send.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                FeedbackCategory.entries.forEachIndexed { index, item ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !sending) {
-                                category = item
-                                result = null
-                            }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(
-                            selected = category == item,
-                            enabled = !sending,
-                            onClick = {
-                                category = item
-                                result = null
-                            },
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            item.label,
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    if (index != FeedbackCategory.entries.lastIndex) RowDivider()
-                }
-            }
-        }
-
-        item {
-            OutlinedTextField(
-                value = note,
-                onValueChange = {
-                    if (it.length <= 1200) {
-                        note = it
-                        result = null
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !sending,
-                label = { Text("Your feedback") },
-                placeholder = { Text("What happened, what did you expect, or what would make this better?") },
-                supportingText = { Text("${note.length}/1200") },
-                minLines = 5,
-                maxLines = 9,
-                shape = RoundedCornerShape(TaskTunnelTokens.CardRadius),
-            )
-        }
-
-        item {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = !sending) {
-                        includeStatus = !includeStatus
-                        result = null
-                    }
-                    .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                Checkbox(
-                    checked = includeStatus,
-                    enabled = !sending,
-                    onCheckedChange = {
-                        includeStatus = it
-                        result = null
-                    },
-                )
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Include app status", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Adds Task Tunnel version, Android version and whether core controls are on. No activity history or app content is included.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        result?.let { submissionResult ->
-            item {
-                val (title, message) = when (submissionResult) {
-                    FeedbackSubmissionResult.Sent -> "Feedback sent" to "Thanks. It was sent successfully."
-                    FeedbackSubmissionResult.NotConfigured -> "Feedback isn't connected yet" to "This build does not have a feedback destination configured."
-                    FeedbackSubmissionResult.NetworkError -> "Couldn't send feedback" to "Check your internet connection and try again."
-                    FeedbackSubmissionResult.Rejected -> "Couldn't send feedback" to "The feedback service rejected this submission. Try again in a moment."
-                }
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(title, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        message,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        item {
-            Button(
-                onClick = {
-                    val draft = currentDraft ?: return@Button
-                    scope.launch {
-                        sending = true
-                        result = null
-                        val submissionResult = sendFeedback(draft)
-                        sending = false
-                        result = submissionResult
-                        if (submissionResult == FeedbackSubmissionResult.Sent) {
-                            note = ""
-                            category = null
-                            includeStatus = false
-                        }
-                    }
-                },
-                enabled = canSend && feedbackConfigured,
-                modifier = Modifier.fillMaxWidth().height(50.dp),
-                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
-            ) {
-                Text(if (sending) "Sending…" else "Send feedback")
-            }
-            Text(
-                if (feedbackConfigured) {
-                    "Feedback leaves this device only when you tap Send."
-                } else {
-                    "Feedback delivery is not configured in this build."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-        }
-    }
-}
 @Composable
 fun DiagnosticsScreen(report: DiagnosticReport, modifier: Modifier = Modifier) {
     val context = LocalContext.current
