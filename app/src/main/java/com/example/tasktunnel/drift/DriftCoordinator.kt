@@ -31,6 +31,8 @@ class DriftCoordinator(
 
     fun markCheckInShown(episodeId: String) = detector.markCheckInShown(episodeId)
 
+    fun rearmShownCheckIn() = detector.rearmShownCheckIn()
+
     /**
      * A shown accessibility overlay can disappear because the user leaves the selected Drift
      * pool or a higher-priority Tunnel interaction takes over. Treat that as an implicit
@@ -49,7 +51,11 @@ class DriftCoordinator(
         return SupportedApp.fromPackage(foregroundPackage)
     }
 
-    fun updateSelectedPackages(packages: Set<String>) = detector.replaceSelectedPackages(packages)
+    fun updateSelectedPackages(packages: Set<String>) {
+        val normalized = packages.toSet()
+        if (normalized == detector.selectedPackages) return
+        detector.replaceSelectedPackages(normalized)
+    }
 
     fun clear() {
         foregroundPackage = null

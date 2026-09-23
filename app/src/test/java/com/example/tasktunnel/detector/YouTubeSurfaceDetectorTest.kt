@@ -53,6 +53,30 @@ class YouTubeSurfaceDetectorTest {
         node(editable = true, visibleToUser = true),
     )
 
+    @Test fun invisibleStaleSearchIdsDoNotOverrideVisibleSubscriptionsTab() = assertDetection(
+        YouTubeSurface.YOUTUBE_SUBSCRIPTIONS,
+        0.85,
+        node("search_query", visibleToUser = false),
+        node("search_results", visibleToUser = false),
+        node(chromeRole = UiChromeRole.YOUTUBE_SUBSCRIPTIONS, selected = true),
+    )
+
+    @Test fun invisibleStaleShortsTreeDoesNotOverrideVisibleHomeTab() = assertDetection(
+        YouTubeSurface.YOUTUBE_HOME,
+        0.85,
+        node("reel_recycler", visibleToUser = false),
+        node("reel_player_page_container", visibleToUser = false),
+        node(chromeRole = UiChromeRole.YOUTUBE_HOME, selected = true),
+    )
+
+    @Test fun invisibleStaleLegacyVideoTreeDoesNotOverrideVisibleSubscriptionsTab() = assertDetection(
+        YouTubeSurface.YOUTUBE_SUBSCRIPTIONS,
+        0.85,
+        node("watch_player", visibleToUser = false),
+        node("player_view", visibleToUser = false),
+        node(chromeRole = UiChromeRole.YOUTUBE_SUBSCRIPTIONS, selected = true),
+    )
+
     @Test fun longVideoSignalsRemainVideo() = assertDetection(
         YouTubeSurface.YOUTUBE_VIDEO,
         0.8,
@@ -242,6 +266,21 @@ class YouTubeSurfaceDetectorTest {
             ),
         )
         assertEquals(YouTubeSubscriptionState.SUBSCRIBED, result.creatorSubscriptionState)
+    }
+
+    @Test fun hiddenSubscriptionStateAloneFailsOpenToUnknownRelation() {
+        val result = YouTubeSurfaceDetector.detect(
+            YouTubeSurfaceDetector.YOUTUBE_PACKAGE,
+            listOf(
+                node("watch_player", visibleHeightFraction = 0.31),
+                node(
+                    youtubeSubscriptionState = YouTubeSubscriptionState.NOT_SUBSCRIBED,
+                    visibleToUser = false,
+                ),
+            ),
+        )
+        assertEquals(YouTubeSurface.YOUTUBE_VIDEO, result.surface)
+        assertEquals(null, result.creatorSubscriptionState)
     }
 
     @Test fun conflictingSubscriptionStateFailsOpenToUnknownRelation() {

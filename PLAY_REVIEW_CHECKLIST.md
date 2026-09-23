@@ -16,10 +16,11 @@ This checklist prepares an eventual submission. Re-verify every policy item and 
 ## Build and manifest audit
 
 - [x] `compileSdk` and `targetSdk` are API 37, meeting the dossier's API 36-or-higher baseline.
-- [x] AccessibilityService requires `BIND_ACCESSIBILITY_SERVICE`, is not exported, and has service metadata.
-- [x] Launcher activity is explicitly exported; no other component is externally exposed.
+- [x] AccessibilityService is explicitly exported for Android system discovery, requires `BIND_ACCESSIBILITY_SERVICE`, and has service metadata.
+- [x] Launcher activity is explicitly exported; the notification action receiver is not exported. No unprotected internal component is externally exposed.
 - [x] Service configuration declares window/content events, content retrieval, generic feedback, and view-ID reporting.
-- [x] Package visibility uses scoped package entries for supported/known apps plus launcher-intent visibility for the user-facing Drift app picker; `QUERY_ALL_PACKAGES` is absent.
+- [x] Package visibility uses targeted entries for known apps plus `MAIN`/`LAUNCHER` intent visibility so the user-facing Drift picker can list launchable apps; `QUERY_ALL_PACKAGES` is absent.
+- [x] Detailed accessibility-tree parsing remains limited to Instagram, YouTube, and TikTok; arbitrary Drift-only apps contribute foreground package identity only.
 - [x] `QUERY_ALL_PACKAGES` is absent.
 - [x] Internet permission is absent; no analytics, telemetry, remote rules, or activity-history upload exists.
 - [x] No unused dangerous permissions are declared.
@@ -28,12 +29,13 @@ This checklist prepares an eventual submission. Re-verify every policy item and 
 - [x] Release configuration does not require private signing credentials for an unsigned assemble check.
 - [x] No production logging statements were found in app source.
 - [ ] Re-run manifest/aapt inspection on the final signed artifact.
+- [ ] Run `python scripts/release_preflight.py` on the final Play-bound tree; it must pass without the placeholder-ID override.
 
 ## Accessibility declaration and disclosure
 
 - [x] Value and operation appear before the Accessibility disclosure.
 - [x] The app presents a prominent, separate disclosure before opening Android settings.
-- [x] Android settings opens only after **Continue to Accessibility settings**.
+- [x] Android settings opens only after the affirmative **Agree & open settings** action; **Not now** remains available.
 - [x] Disclosure explains visible-interface access, purpose, retained data, excluded data, and local processing.
 - [x] Copy identifies the feature as digital wellbeing and does not claim disability-support status.
 - [x] Interventions are narrow, deterministic, explainable, and user-controlled.
@@ -47,13 +49,13 @@ This checklist prepares an eventual submission. Re-verify every policy item and 
 - [ ] Complete the Data safety form from actual release behavior; do not copy assumptions from this checklist.
 - [ ] Confirm the public privacy policy, store description, screenshots, and review notes use consistent claims.
 - [ ] Explain why AccessibilityService is necessary for the user-facing Task Tunnel feature and why narrower APIs cannot identify native app surfaces.
-- [ ] Declare only fixed package visibility; confirm the final merged manifest has no broad query permission.
+- [ ] Explain the launcher-intent package visibility used by the Drift app picker and confirm the final merged manifest still has no `QUERY_ALL_PACKAGES` permission.
 - [ ] Upload the reviewer video and provide reproducible reviewer steps.
 - [ ] Verify that release UI contains no inspector, fingerprint, detector confidence, resource ID, package ID, node count, or developer copy action.
 
 ## External beta gate
 
-- [ ] Complete every applicable row in `MANUAL_TEST_M6.md` on the release candidate.
+- [ ] Complete every applicable P0/P1 row in `MANUAL_TEST_RELEASE_CANDIDATE.md` on the exact release candidate.
 - [ ] Record installed supported-app versions for every physical detector run.
 - [ ] Confirm repair behavior after permission removal, process death, and reboot.
 - [ ] Inspect a copied diagnostic report manually for sensitive data.

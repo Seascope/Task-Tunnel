@@ -135,6 +135,21 @@ class DriftDetectorTest {
     }
 
     @Test
+    fun temporarilyHiddenShownCheckInCanRearmSameFrozenEpisode() {
+        val detector = detector(quiet = 60)
+        trigger(detector)
+        val episode = requireNotNull(detector.pendingCheckIn)
+        detector.markCheckInShown(episode.id)
+
+        // Keep it marked shown through a long UI boundary so quiet-reset cannot erase it.
+        detector.observeForeground(YOUTUBE, 100)
+        detector.rearmShownCheckIn()
+
+        assertEquals(episode.id, detector.pendingCheckIn?.id)
+        assertEquals(episode.involvedPackages, detector.pendingCheckIn?.involvedPackages)
+    }
+
+    @Test
     fun resolvingEpisodeStartsFreshSequenceFromCurrentApp() {
         val detector = detector(selected = SELECTED_WITH_TIKTOK)
         trigger(detector)

@@ -16,6 +16,37 @@ class TikTokSurfaceDetectorTest {
     }
 
     @Test
+    fun inboxSearchControlDoesNotMasqueradeAsGlobalSearch() {
+        assertDetection(
+            TikTokSurface.TIKTOK_INBOX,
+            node("omr", selected = true, clickable = true),
+            node("omy"),
+            node("hu0", editable = true),
+        )
+    }
+
+    @Test
+    fun profileSearchControlCannotBypassProfileGuard() {
+        assertDetection(
+            TikTokSurface.TIKTOK_PROFILE,
+            node("oms", selected = true, clickable = true),
+            node("omy"),
+            node("hu0", editable = true),
+            node("viewpager_search"),
+        )
+    }
+
+    @Test
+    fun globalSearchStillWinsOverSelectedFeedTab() {
+        assertDetection(
+            TikTokSurface.TIKTOK_SEARCH,
+            node("omq", selected = true, clickable = true),
+            node("omy"),
+            node("hu0", editable = true),
+        )
+    }
+
+    @Test
     fun selectedNavigationTabsMapToSemanticSurfaces() {
         mapOf(
             "omq" to TikTokSurface.TIKTOK_FEED,

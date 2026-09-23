@@ -46,7 +46,7 @@ Task Tunnel does not retain:
 - raw fingerprints;
 - resource identifiers or node classes in Attention history.
 
-Developer-only fingerprints and the sanitized tree inspector are compiled behind the debug-build gate and are unavailable from normal release UI. Nothing uploads raw trees automatically.
+Developer-only fingerprints and the sanitized tree inspector are guarded by `BuildConfig.DEBUG` and are unavailable from normal release UI. Nothing uploads raw trees automatically.
 
 ## Processing, backup, and control
 
@@ -60,7 +60,7 @@ Supported-app Drift check-ins can offer **Set an intention** and **Keep going**.
 
 ## Enabling and disabling access
 
-Task Tunnel first explains its value, operation, data handling, and AccessibilityService use in the app. It opens Android Accessibility settings only after the user taps **Continue to Accessibility settings**.
+Task Tunnel first explains its value, operation, data handling, and AccessibilityService use in the app. It opens Android Accessibility settings only after the user taps the affirmative **Agree & open settings** action. A clear **Not now** path remains available.
 
 The in-app master control can pause all Task Tunnel behavior without erasing the user's configuration or disabling Android Accessibility permission. The user can also disable Accessibility access entirely in Android Settings > Accessibility > Task Tunnel protection. The rest of the app remains available for privacy information, diagnostics, and existing local Attention history.
 

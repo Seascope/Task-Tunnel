@@ -60,7 +60,9 @@ object InstagramSurfaceDetector {
             "creation_root",
             "creation_main_container",
         )
-        val createFlowSupport = createFlowSupportIds.filter(::present).sorted()
+        val createFlowSupport = createFlowSupportIds.filter { id ->
+            active(id, visible = true)
+        }.sorted()
 
         val inboxStrong = directSelected &&
             active("inbox_refreshable_thread_list_recyclerview", visible = true, scrollable = true)

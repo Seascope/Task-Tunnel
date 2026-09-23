@@ -262,6 +262,7 @@ class TunnelCoordinator(
     var state: TunnelRuntimeState = TunnelRuntimeState()
         private set
     private var checkInsEnabled = true
+    private var activeUsePausedAtMillis: Long? = null
 
     fun setCheckInsEnabled(enabled: Boolean) {
         checkInsEnabled = enabled
@@ -275,7 +276,46 @@ class TunnelCoordinator(
 
     /** Clears all live tunnel state without changing any persisted user preference. */
     fun reset() {
+        activeUsePausedAtMillis = null
         state = TunnelRuntimeState()
+    }
+
+    /**
+     * Pause active-use-only clocks while the device is not interactable (for example, while
+     * keyguard owns the screen). The user's explicit tunnel duration remains wall-clock time,
+     * but detour allowances and intentional check-in cadence must not burn behind the lock screen.
+     */
+    fun pauseActiveUse(nowMillis: Long) {
+        if (activeUsePausedAtMillis != null) return
+        val activeProtectedSession = state.activeSession?.let {
+            it.status == TunnelStatus.ACTIVE && it.app.packageName == state.foregroundPackage
+        } == true
+        if (!activeProtectedSession) return
+        activeUsePausedAtMillis = nowMillis
+    }
+
+    fun resumeActiveUse(nowMillis: Long) {
+        val pausedAt = activeUsePausedAtMillis ?: return
+        activeUsePausedAtMillis = null
+        val session = state.activeSession?.takeIf { it.status == TunnelStatus.ACTIVE } ?: return
+        if (session.app.packageName != state.foregroundPackage) return
+        if (session.isExpiredAt(nowMillis)) {
+            advanceTime(nowMillis)
+            return
+        }
+        val pausedDuration = (nowMillis - pausedAt).coerceAtLeast(0L)
+        if (pausedDuration == 0L) return
+        state = state.copy(
+            overrideScope = state.overrideScope?.takeIf { it.sessionId == session.id }?.let {
+                it.copy(expiresAtMillis = it.expiresAtMillis + pausedDuration)
+            },
+            checkIn = state.checkIn?.takeIf { it.sessionId == session.id }?.let { checkIn ->
+                checkIn.copy(
+                    nextCheckAtMillis = checkIn.nextCheckAtMillis?.plus(pausedDuration),
+                )
+            },
+        )
+        advanceTime(nowMillis)
     }
 
     fun observeForeground(packageName: String, nowMillis: Long) {
@@ -335,12 +375,11 @@ class TunnelCoordinator(
                         prompt = null,
                         overrideScope = state.overrideScope?.takeIf { it.sessionId == session.id }
                             ?.let { override ->
-                                val detourCheckIn = state.checkIn?.takeIf {
-                                    it.sessionId == session.id &&
-                                        it.kind == IntentionCheckInKind.DETOUR_RENEWAL &&
-                                        it.surface == override.surface
-                                }
-                                if (leftAt != null && detourCheckIn != null) {
+                                // Temporary detour allowances are active-use time, independent of
+                                // whether intentional check-ins are enabled. Keep the allowance's
+                                // remaining time intact across a quick switch away from the
+                                // protected app instead of coupling the pause to check-in state.
+                                if (leftAt != null) {
                                     override.copy(expiresAtMillis = override.expiresAtMillis + awayDuration)
                                 } else override
                             }
@@ -729,10 +768,29 @@ class TunnelCoordinator(
     fun advanceTime(nowMillis: Long) {
         val session = state.activeSession ?: return
         val previousOverride = state.overrideScope?.takeIf { it.sessionId == session.id }
-        val override = previousOverride?.takeIf { nowMillis < it.expiresAtMillis }
         val cooldown = state.returnCooldown?.takeIf {
             it.sessionId == session.id && nowMillis < it.untilMillis
         }
+
+        if (activeUsePausedAtMillis != null) {
+            if (session.status == TunnelStatus.ACTIVE && session.isExpiredAt(nowMillis)) {
+                state = state.copy(
+                    activeSession = session.copy(status = TunnelStatus.EXPIRED),
+                    prompt = TunnelPrompt.SessionExpired(session.id, session.app, session.task),
+                    overrideScope = null,
+                    returnCooldown = null,
+                    checkIn = null,
+                    detourAllow = null,
+                )
+            } else {
+                // Return cooldown is wall-clock protection against stale navigation evidence, but
+                // active-use allowance/check-in clocks stay frozen until resumeActiveUse().
+                state = state.copy(returnCooldown = cooldown)
+            }
+            return
+        }
+
+        val override = previousOverride?.takeIf { nowMillis < it.expiresAtMillis }
         if (session.status == TunnelStatus.EXPIRED) {
             state = state.copy(overrideScope = override, returnCooldown = cooldown)
             return
@@ -830,6 +888,9 @@ class TunnelCoordinator(
 
     fun nextDeadlineMillis(): Long? {
         val session = state.activeSession ?: return null
+        if (activeUsePausedAtMillis != null) {
+            return session.takeIf { it.status == TunnelStatus.ACTIVE }?.expiresAtMillis
+        }
         val deadlines = buildList {
             state.overrideScope?.takeIf { it.sessionId == session.id }?.let { add(it.expiresAtMillis) }
             if (session.status == TunnelStatus.ACTIVE) {

@@ -108,6 +108,27 @@ class InstagramSurfaceDetectorTest {
         )
     }
 
+    @Test fun visibleGalleryPickerOverridesStaleSelectedTabUnderModal() {
+        assertDetection(
+            InstagramSurface.INSTAGRAM_CREATE, 0.90,
+            activeTab("feed_tab"),
+            node("gallery_picker_grid_item_container", visible = true),
+        )
+    }
+
+    @Test fun invisibleGalleryPickerDoesNotOverrideCurrentSurface() {
+        assertDetection(
+            InstagramSurface.INSTAGRAM_HOME, 0.85,
+            activeTab("feed_tab"),
+            node("gallery_picker_grid_item_container"),
+        )
+    }
+
+    @Test fun invisibleCreateSupportAloneIsUnknown() = assertUnknown(
+        node("creation_root"),
+        node("media_picker_container"),
+    )
+
     @Test fun clipsVideoAloneIsUnknown() = assertUnknown(node("clips_video_container"))
 
     @Test fun clipsViewPagerAloneIsUnknown() = assertUnknown(node("clips_viewer_view_pager"))

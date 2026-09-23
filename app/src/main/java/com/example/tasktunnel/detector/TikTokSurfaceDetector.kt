@@ -42,14 +42,31 @@ object TikTokSurfaceDetector {
             candidate == id && indexedNode.second.visibleToUser && indexedNode.second.selected && indexedNode.second.clickable
         }
 
-        val searchEntry = active("hu0", editable = true) ||
-            (active("hu0", editable = true) && active("tv_search_textview")) ||
-            (active("hu0", editable = true) && active("lkh", scrollable = true))
+        val selected = listOf(
+            "inbox" to selectedNav("omr"),
+            "profile" to selectedNav("oms"),
+            "friends" to selectedNav("omp"),
+            "feed" to selectedNav("omq"),
+        ).filter { it.second }.map { it.first }
+        if (selected.size > 1) return unknown(selected.map { "conflict:selected:$it" })
+
+        // Inbox/Profile expose their own search-like controls in TikTok 47.x. Those controls are
+        // not the global Search destination and must not let a Search/Watch tunnel bypass the
+        // Profile guard (saved videos are reachable there). Our directed global Search route
+        // deliberately returns to For You first, so a selected Inbox/Profile tab is stronger
+        // evidence than generic search widgets on those screens.
+        when (selected.singleOrNull()) {
+            "inbox" -> return result(TikTokSurface.TIKTOK_INBOX, 0.95, listOf("active:selected:omr", "navigation:$NAVIGATION_ID"))
+            "profile" -> return result(TikTokSurface.TIKTOK_PROFILE, 0.95, listOf("active:selected:oms", "navigation:$NAVIGATION_ID"))
+        }
+
+        val searchEntry = active("hu0", editable = true)
         val searchResults = active("viewpager_search") ||
             (active("hu0", editable = true) && (active("pzk") || active("nhr")))
         val searchVideo = active("tv_bar_search") || active("tv_search_sug_word") ||
             (active("o8c") && (active("viewpager_search") || active("hu0", editable = true)))
-        // Search-origin evidence wins before generic feed evidence because result videos retain feed IDs.
+        // Search-origin evidence wins before Feed/Friends because result videos can retain the
+        // previously selected source tab while their content is already in global Search.
         if (searchEntry || searchResults || searchVideo) {
             return result(
                 TikTokSurface.TIKTOK_SEARCH,
@@ -68,16 +85,7 @@ object TikTokSurfaceDetector {
             )
         }
 
-        val selected = listOf(
-            "inbox" to selectedNav("omr"),
-            "profile" to selectedNav("oms"),
-            "friends" to selectedNav("omp"),
-            "feed" to selectedNav("omq"),
-        ).filter { it.second }.map { it.first }
-        if (selected.size > 1) return unknown(selected.map { "conflict:selected:$it" })
         return when (selected.singleOrNull()) {
-            "inbox" -> result(TikTokSurface.TIKTOK_INBOX, 0.95, listOf("active:selected:omr", "navigation:$NAVIGATION_ID"))
-            "profile" -> result(TikTokSurface.TIKTOK_PROFILE, 0.95, listOf("active:selected:oms", "navigation:$NAVIGATION_ID"))
             "friends" -> result(TikTokSurface.TIKTOK_FRIENDS, 0.95, listOf("active:selected:omp", "navigation:$NAVIGATION_ID"))
             "feed" -> result(TikTokSurface.TIKTOK_FEED, 0.95, listOf("active:selected:omq", "navigation:$NAVIGATION_ID"))
             null -> if (active(NAVIGATION_ID)) result(TikTokSurface.TIKTOK_OTHER, 0.60, listOf("active:$NAVIGATION_ID")) else unknown()

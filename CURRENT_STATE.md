@@ -1,5 +1,24 @@
 # Current State
 
+
+## Release candidate stabilization — 2026-09-23
+
+This section is the current source of truth for release work. Older milestone sections below are historical and may describe narrower app scope or earlier UI.
+
+- Primary app destinations are **Home**, **Attention**, **Review**, and **Protection**, with **Settings** as a secondary destination.
+- Protected Task Tunnel apps are **Instagram, YouTube, and TikTok**. Arbitrary installed launchable apps can participate in Drift Detection, but only the three supported apps receive detailed accessibility-tree classification and purpose flows.
+- Purpose Gate remembers the last successfully started purpose per supported app. Only the last-used purpose may show its remembered duration; other purposes default to **No limit** unless the user explicitly chooses a duration.
+- Drift remains time-based app switching rather than intention state. Active Task Tunnel interaction outranks Drift presentation; suppressing a Drift overlay must not erase its frozen episode/history.
+- Check-ins and temporary allowances use active-use timing. They pause while outside the protected app and while the device is locked; an explicit user-selected tunnel duration remains wall-clock.
+- Active-tunnel notification controls are a thin remote control over `TunnelRuntimeState`. Stale session actions are ignored, rapid same-session actions are arbitrated, and SystemUI does not count as leaving the protected app.
+- Master protection OFF makes the AccessibilityService behavior inert without deleting saved configuration/history. ON performs bounded foreground reconciliation so an already-open supported app is noticed even if the first accessibility root is temporarily unavailable.
+- Screen OFF/keyguard is a UI boundary: overlays and directed navigation are cancelled while coordinator state is preserved. Unlock/reconnect performs fresh foreground reconciliation.
+- Current manual release gate is `MANUAL_TEST_RELEASE_CANDIDATE.md`; older `MANUAL_TEST_M*.md` files are historical milestone records.
+- Current Play-review preparation is `PLAY_REVIEW_CHECKLIST.md`, `PLAY_REVIEW_VIDEO_SCRIPT.md`, `ACCESSIBILITY_DISCLOSURE.md`, `PRIVACY_SUMMARY.md`, and `RELEASE_AUDIT_RC.md`.
+- Production manifest currently declares only `POST_NOTIFICATIONS`; there is no `INTERNET` permission, analytics SDK, account system, Formspree/feedback backend, or remote detector-rule path.
+- Accessibility metadata remains `isAccessibilityTool=false`. The service is exported for Android system discovery and protected by `BIND_ACCESSIBILITY_SERVICE`; the notification action receiver is not exported.
+- `com.example.tasktunnel` remains a deliberate publication blocker until a permanent application ID is chosen. Do not change it implicitly during feature/bug work.
+
 ## Active Tunnel notification controls — 2026-09-22
 
 Status: stabilized implementation in the working tree; physical notification validation required.

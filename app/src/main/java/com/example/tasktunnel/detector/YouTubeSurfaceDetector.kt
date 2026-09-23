@@ -73,8 +73,12 @@ object YouTubeSurfaceDetector {
             .filter { it.visibleToUser }
             .mapNotNull { it.resourceId?.normalizedId() }
             .toSet()
-        val shortsMatches = shortsIds.intersect(ids).sorted()
-        val videoMatches = videoIds.intersect(ids).sorted()
+        // Specialized surface anchors must be visible. The sanitizer intentionally retains
+        // invisible nodes, and YouTube can keep stale player/Shorts/Search subtrees attached while
+        // a different surface is already on screen. Letting those hidden IDs count as
+        // strong evidence can incorrectly outrank the actually visible selected tab.
+        val shortsMatches = shortsIds.intersect(visibleIds).sorted()
+        val videoMatches = videoIds.intersect(visibleIds).sorted()
         val fullPlayerControlMatches = fullPlayerControlIds.intersect(visibleIds).sorted()
         val modernWatchContentMatches = modernWatchContentIds.intersect(visibleIds).sorted()
         // Playback chrome/time-bar nodes can remain structurally present while controls are
@@ -84,7 +88,7 @@ object YouTubeSurfaceDetector {
         val hasModernWatchPage = modernWatchContainerId in visibleIds &&
             modernWatchContentMatches.isNotEmpty() &&
             (modernWatchPlaybackMatches.isNotEmpty() || fullPlayerControlMatches.isNotEmpty())
-        val searchMatches = searchIds.intersect(ids).sorted()
+        val searchMatches = searchIds.intersect(visibleIds).sorted()
         val shellMatches = shellIds.intersect(ids).sorted()
         val selectedChromeRoles = nodes.asSequence()
             .filter { it.visibleToUser && it.selected }
@@ -94,9 +98,6 @@ object YouTubeSurfaceDetector {
         val visibleSubscriptionCandidates = nodes.asSequence()
             .filter { it.visibleToUser && it.youtubeSubscriptionState != null }
             .toList()
-        val allSubscriptionStates = nodes.asSequence()
-            .mapNotNull { it.youtubeSubscriptionState }
-            .toSet()
         val hasBackNavigationChrome = nodes.any {
             it.visibleToUser && it.chromeRole == UiChromeRole.YOUTUBE_BACK
         }
@@ -128,7 +129,6 @@ object YouTubeSurfaceDetector {
         val creatorSubscriptionState = selectCurrentCreatorSubscriptionState(
             nodes = nodes,
             visibleCandidates = visibleSubscriptionCandidates,
-            allStates = allSubscriptionStates,
             videoStrong = videoStrong,
             shortsStrong = shortsStrong,
         )
@@ -227,7 +227,6 @@ object YouTubeSurfaceDetector {
     private fun selectCurrentCreatorSubscriptionState(
         nodes: List<SanitizedNode>,
         visibleCandidates: List<SanitizedNode>,
-        allStates: Set<YouTubeSubscriptionState>,
         videoStrong: Boolean,
         shortsStrong: Boolean,
     ): YouTubeSubscriptionState? {
@@ -277,12 +276,14 @@ object YouTubeSurfaceDetector {
             chooseNearestUnambiguousState(shortCandidates)?.let { return it }
         }
 
-        val visibleStates = visibleCandidates.mapNotNull { it.youtubeSubscriptionState }.toSet()
-        return when {
-            visibleStates.size == 1 -> visibleStates.single()
-            visibleStates.size > 1 -> null
-            else -> allStates.singleOrNull()
-        }
+        // Never infer creator state from invisible/offscreen controls alone. YouTube can retain
+        // stale Subscribe/Subscribed nodes from the previous video or recommendation rows. With
+        // no visible current-creator evidence, UNKNOWN must fail open rather than blocking based
+        // on a hidden semantic residue.
+        return visibleCandidates
+            .mapNotNull { it.youtubeSubscriptionState }
+            .toSet()
+            .singleOrNull()
     }
 
     private fun chooseNearestUnambiguousState(

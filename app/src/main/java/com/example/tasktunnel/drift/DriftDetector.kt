@@ -116,6 +116,12 @@ class DriftDetector(
         state = state.copy(episode = episode.copy(checkInShown = true))
     }
 
+    /** Make the same frozen episode eligible for presentation again after a temporary UI boundary. */
+    fun rearmShownCheckIn() {
+        val episode = state.episode?.takeIf { it.checkInShown && !it.acknowledged } ?: return
+        state = state.copy(episode = episode.copy(checkInShown = false))
+    }
+
     fun acknowledge(episodeId: String, nowMillis: Long) {
         if (state.episode?.id != episodeId) return
         val baselinePackage = state.lastObservedPackage?.takeIf { it in selectedPackages }

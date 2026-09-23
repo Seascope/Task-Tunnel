@@ -60,6 +60,29 @@ class DriftCoordinatorTest {
     }
 
     @Test
+    fun reloadingSameSelectedPoolDoesNotErasePendingEpisode() {
+        val drift = coordinator()
+        triggerEndingOn(drift, REDDIT)
+        val episode = requireNotNull(drift.checkInCandidate(false))
+
+        drift.updateSelectedPackages(SELECTED.toSet())
+
+        assertEquals(episode.id, drift.state.episode?.id)
+        assertEquals(episode.involvedPackages, drift.checkInCandidate(false)?.involvedPackages)
+    }
+
+    @Test
+    fun actualSelectedPoolChangeStillClearsTransientEpisode() {
+        val drift = coordinator()
+        triggerEndingOn(drift, REDDIT)
+
+        drift.updateSelectedPackages(setOf(INSTAGRAM, YOUTUBE))
+
+        assertNull(drift.state.episode)
+        assertTrue(drift.state.transitions.isEmpty())
+    }
+
+    @Test
     fun foregroundObservationsAreNotClearedByTunnelLifecycle() {
         val drift = coordinator()
 
