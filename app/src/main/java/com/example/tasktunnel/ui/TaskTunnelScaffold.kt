@@ -19,7 +19,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
 enum class PrimaryDestination(val label: String) {
@@ -43,7 +42,7 @@ fun TaskTunnelScaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
-                title = { Text(destination.label, style = MaterialTheme.typography.headlineSmall) },
+                title = { Text(destination.label, style = MaterialTheme.typography.titleLarge) },
                 actions = {
                     IconButton(onClick = onOpenSettings) {
                         TaskTunnelIcon(TaskTunnelIconKind.SETTINGS, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurface)
@@ -73,14 +72,14 @@ fun TaskTunnelScaffold(
                                         PrimaryDestination.PROTECTION -> TaskTunnelIconKind.PROTECTION
                                     },
                                     Modifier.size(23.dp),
-                                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             },
-                            label = { Text(item.label, style = MaterialTheme.typography.labelMedium) },
+                            label = { Text(item.label, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
                                 selectedTextColor = MaterialTheme.colorScheme.primary,
-                                indicatorColor = Color.Transparent,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             ),

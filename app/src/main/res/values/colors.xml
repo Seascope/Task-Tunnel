@@ -4,7 +4,7 @@
     <color name="task_tunnel_blue">#79AFFF</color>
     <color name="notification_text_primary">#FF1F2328</color>
     <color name="notification_text_secondary">#FF646A73</color>
-    <color name="notification_action_background">#142F6FBE</color>
+    <color name="notification_action_background">#1F2F6FBE</color>
     <color name="notification_action_text">#FF2F6FBE</color>
     <color name="notification_progress_track">#22000000</color>
 </resources>

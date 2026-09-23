@@ -10,7 +10,7 @@ Audit date: 20 September 2026. Scope: repository configuration and beta-readines
 - Components: launcher activity exported as required by its intent filter; AccessibilityService not exported and protected by `BIND_ACCESSIBILITY_SERVICE`.
 - Service metadata: content retrieval, relevant events, feedback type, settings activity, view-ID reporting, and no gesture/filter-key request are declared.
 - Visibility: fixed `<queries>` entries for Instagram, YouTube, and official Reddit; no `QUERY_ALL_PACKAGES`.
-- Permissions: no Internet permission and no dangerous runtime permission declarations.
+- Permissions: Internet permission is present only for explicit in-app feedback submission; no dangerous runtime permission declarations were added for feedback.
 - Privacy: Attention stores structured semantic events only. Database/WAL/SHM and Task Tunnel preference files are excluded from backup and device transfer. No screenshots, accessibility text, raw tree, or fingerprint is persisted by the production path.
 - UI separation: normal diagnostics are an explicit sanitized schema. Inspector, fingerprint copy, confidence, package transitions, resource IDs, and node details require `BuildConfig.DEBUG`; release routing falls back to production-safe diagnostics.
 - Logging: no app-source `Log`, `println`, or stack-trace output found.

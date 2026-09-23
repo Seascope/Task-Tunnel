@@ -32,10 +32,13 @@ import com.example.tasktunnel.accessibility.AccessibilityRuntime
 import com.example.tasktunnel.attention.AttentionViewModel
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.drift.DriftPoolPreferences
+import com.example.tasktunnel.feedback.FeedbackSender
+import com.example.tasktunnel.feedback.FeedbackStatusReport
 import com.example.tasktunnel.onboarding.OnboardingFlow
 import com.example.tasktunnel.onboarding.OnboardingPreferences
 import com.example.tasktunnel.onboarding.OnboardingProgress
 import com.example.tasktunnel.onboarding.OnboardingStep
+import com.example.tasktunnel.onboarding.SetupChecklistState
 import com.example.tasktunnel.notification.TunnelNotificationPreferences
 import com.example.tasktunnel.notification.TunnelNotificationController
 import com.example.tasktunnel.protection.DeveloperDiagnosticsGate
@@ -48,6 +51,7 @@ import com.example.tasktunnel.ui.AttentionScreen
 import com.example.tasktunnel.ui.DeveloperScreen
 import com.example.tasktunnel.ui.DiagnosticsScreen
 import com.example.tasktunnel.ui.EpisodeDetailScreen
+import com.example.tasktunnel.ui.FeedbackScreen
 import com.example.tasktunnel.ui.InspectorScreen
 import com.example.tasktunnel.ui.OnboardingScreen
 import com.example.tasktunnel.ui.PrimaryDestination
@@ -90,6 +94,15 @@ class MainActivity : ComponentActivity() {
                 var selectedEpisodeId by remember { mutableStateOf<String?>(null) }
                 var disclosureReturn by remember { mutableStateOf(MainDestination.PROTECTION) }
                 var onboarding by remember { mutableStateOf(OnboardingPreferences.load(this@MainActivity)) }
+                val firstTunnelStarted =
+                    OnboardingPreferences.hasStartedFirstTunnel(this@MainActivity) ||
+                        runtime.tunnelState.activeSession != null ||
+                        attention.episodes.any { it.task != null }
+                LaunchedEffect(firstTunnelStarted) {
+                    if (firstTunnelStarted) {
+                        OnboardingPreferences.markFirstTunnelStarted(this@MainActivity)
+                    }
+                }
                 var selectedDriftPackages by remember { mutableStateOf(DriftPoolPreferences.load(this@MainActivity)) }
                 val availableDriftApps = remember(lifecycleRefresh) {
                     DriftAppCatalog.installedLaunchableApps(this@MainActivity)
@@ -102,12 +115,13 @@ class MainActivity : ComponentActivity() {
                         this@MainActivity,
                         Manifest.permission.POST_NOTIFICATIONS,
                     ) == PackageManager.PERMISSION_GRANTED
-                LaunchedEffect(onboarding.completed, notificationPermissionGranted, protectionEnabled) {
+                LaunchedEffect(onboarding.completed, notificationPermissionGranted, protectionEnabled, firstTunnelStarted) {
                     // Only offer the runtime permission here. A user-disabled app/channel setting is
                     // an explicit system preference and should be repaired from Settings, not nagged
                     // by the first-run permission dialog.
                     showNotificationOffer = protectionEnabled &&
                         onboarding.completed &&
+                        firstTunnelStarted &&
                         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                         !notificationPermissionGranted &&
                         !TunnelNotificationPreferences.wasPermissionOffered(this@MainActivity)
@@ -163,6 +177,9 @@ class MainActivity : ComponentActivity() {
                     homeViewModel.refresh()
                 }
                 val openAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                val openSupportedApp: (String) -> Unit = { packageName ->
+                    packageManager.getLaunchIntentForPackage(packageName)?.let(::startActivity)
+                }
                 val snapshot = remember(
                     serviceEnabled,
                     runtime.connected,
@@ -180,6 +197,17 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                LaunchedEffect(onboarding.completed, onboarding.step, firstTunnelStarted) {
+                    if (!onboarding.completed && onboarding.step == OnboardingStep.TRY && firstTunnelStarted) {
+                        saveOnboarding(OnboardingFlow.next(onboarding))
+                    }
+                }
+                val setupChecklist = SetupChecklistState(
+                    supportedAppInstalled = snapshot.apps.take(3).any { it.versionName != null },
+                    accessibilityEnabled = serviceEnabled,
+                    firstTunnelStarted = firstTunnelStarted,
+                )
+
                 val displayHealth = if (protectionEnabled) {
                     snapshot.health
                 } else {
@@ -194,17 +222,15 @@ class MainActivity : ComponentActivity() {
                     OnboardingScreen(
                         progress = onboarding,
                         accessibilityEnabled = serviceEnabled,
+                        supportedApps = snapshot.apps.take(3),
+                        firstTunnelStarted = firstTunnelStarted,
                         selectedDriftPackages = selectedDriftPackages,
                         availableDriftApps = availableDriftApps,
                         setDriftEnabled = setDriftEnabled,
                         setDriftAppEnabled = setDriftAppEnabled,
                         advance = { saveOnboarding(OnboardingFlow.next(onboarding)) },
-                        openAccessibilitySettings = {
-                            if (onboarding.step == OnboardingStep.DISCLOSURE) {
-                                saveOnboarding(OnboardingFlow.next(onboarding))
-                            }
-                            openAccessibilitySettings()
-                        },
+                        openAccessibilitySettings = openAccessibilitySettings,
+                        openSupportedApp = openSupportedApp,
                         completeLater = { saveOnboarding(OnboardingFlow.completeLater()) },
                     )
                 } else {
@@ -219,6 +245,7 @@ class MainActivity : ComponentActivity() {
                             MainDestination.REVIEW -> MainDestination.REVIEW
                             MainDestination.SETTINGS -> lastPrimary
                             MainDestination.DIAGNOSTICS -> MainDestination.SETTINGS
+                            MainDestination.FEEDBACK -> MainDestination.SETTINGS
                             MainDestination.DISCLOSURE -> disclosureReturn
                             MainDestination.DEVELOPER -> MainDestination.SETTINGS
                             MainDestination.INSPECTOR -> MainDestination.DEVELOPER
@@ -291,6 +318,8 @@ class MainActivity : ComponentActivity() {
                                     ProtectionScreen(
                                         snapshot = snapshot,
                                         protectionEnabled = protectionEnabled,
+                                        setupChecklist = setupChecklist,
+                                        openSupportedApp = openSupportedApp,
                                         setProtectionEnabled = setProtectionEnabled,
                                         selectedDriftPackages = selectedDriftPackages,
                                         availableDriftApps = availableDriftApps,
@@ -355,7 +384,26 @@ class MainActivity : ComponentActivity() {
                                     disclosureReturn = MainDestination.SETTINGS
                                     destination = MainDestination.DISCLOSURE
                                 },
+                                openFeedback = { destination = MainDestination.FEEDBACK },
                                 openDeveloper = { destination = MainDestination.DEVELOPER },
+                                modifier = it,
+                            )
+                        }
+                        MainDestination.FEEDBACK -> SecondaryScaffold("Send feedback", { destination = MainDestination.SETTINGS }) {
+                            val feedbackStatus = FeedbackStatusReport(
+                                appVersion = BuildConfig.VERSION_NAME,
+                                androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+                                accessibilityEnabled = serviceEnabled,
+                                protectionEnabled = protectionEnabled,
+                                driftEnabled = selectedDriftPackages.isNotEmpty(),
+                                notificationControlsEnabled = notificationControlsEnabled,
+                            )
+                            FeedbackScreen(
+                                statusReport = feedbackStatus,
+                                feedbackConfigured = BuildConfig.FEEDBACK_FORM_ID.isNotBlank(),
+                                sendFeedback = { draft ->
+                                    FeedbackSender.submit(BuildConfig.FEEDBACK_FORM_ID, draft, feedbackStatus)
+                                },
                                 modifier = it,
                             )
                         }
@@ -406,6 +454,7 @@ class MainActivity : ComponentActivity() {
         lifecycleRefresh += 1
     }
 
+
     private fun refreshNotificationState() {
         notificationControlsEnabled = TunnelNotificationPreferences.controlsEnabled(this)
     }
@@ -424,6 +473,7 @@ private enum class MainDestination {
     EPISODE,
     PROTECTION,
     SETTINGS,
+    FEEDBACK,
     DIAGNOSTICS,
     DISCLOSURE,
     DEVELOPER,

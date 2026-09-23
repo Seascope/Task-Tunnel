@@ -85,7 +85,6 @@ object AttentionPatternAnalyzer {
         return patterns
             .sortedWith(compareByDescending<AttentionPattern> { it.evidenceCount * 100L + it.sampleSize }
                 .thenByDescending { it.latestEvidenceMillis })
-            .take(3)
     }
 
     private fun commonDetourPatterns(events: List<AttentionEvent>): List<AttentionPattern> {

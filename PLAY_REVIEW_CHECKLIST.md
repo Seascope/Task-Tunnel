@@ -21,7 +21,7 @@ This checklist prepares an eventual submission. Re-verify every policy item and 
 - [x] Service configuration declares window/content events, content retrieval, generic feedback, and view-ID reporting.
 - [x] Package visibility is restricted to Instagram, YouTube, and official Reddit.
 - [x] `QUERY_ALL_PACKAGES` is absent.
-- [x] Internet permission is absent.
+- [x] Internet permission is used only for explicit user-submitted feedback; no analytics, telemetry, remote rules, or activity-history upload exists.
 - [x] No unused dangerous permissions are declared.
 - [x] Application and service labels describe Task Tunnel protection rather than a developer spike.
 - [x] Attention database, WAL, SHM, onboarding, and Drift preference files are excluded from cloud backup and device transfer.

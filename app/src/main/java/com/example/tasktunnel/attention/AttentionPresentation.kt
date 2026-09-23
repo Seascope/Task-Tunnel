@@ -89,3 +89,122 @@ fun episodeSubtitle(episode: AttentionEpisode): String = when (episode.type) {
     AttentionEpisodeType.DRIFT -> episode.involvedApps.joinToString(" → ") { it.displayName }
         .ifBlank { "App switching check-in" }
 }
+
+/** A single human-readable moment for the episode detail screen. */
+data class AttentionStoryItem(
+    val timestampMillis: Long,
+    val text: String,
+)
+
+/**
+ * Returns only the exceptional outcome worth surfacing in the recent-history list.
+ * Normal intentional use deliberately returns null so quiet sessions stay visually quiet.
+ */
+fun episodeHighlight(episode: AttentionEpisode): String? {
+    if (episode.type == AttentionEpisodeType.DRIFT) {
+        val driftDecision = episode.events.lastOrNull {
+            it.subtype == AttentionSubtype.KEEP_GOING || it.subtype == AttentionSubtype.SET_INTENTION
+        }
+        return when (driftDecision?.subtype) {
+            AttentionSubtype.KEEP_GOING -> "Kept going after the check-in"
+            AttentionSubtype.SET_INTENTION -> "Set an intention after the check-in"
+            else -> null
+        }
+    }
+
+    val detourDecision = episode.events.lastOrNull {
+        it.subtype == AttentionSubtype.RETURN ||
+            it.subtype == AttentionSubtype.ALLOW_ANYWAY ||
+            it.subtype == AttentionSubtype.END_TUNNEL
+    }
+    if (detourDecision != null) {
+        val interruptedSurface = detourDecision.surface?.let(::surfaceLabel)
+            ?: episode.events.lastOrNull {
+                it.timestampMillis <= detourDecision.timestampMillis &&
+                    it.subtype == AttentionSubtype.SURFACE_INTERVENTION
+            }?.surface?.let(::surfaceLabel)
+        return when (detourDecision.subtype) {
+            AttentionSubtype.RETURN -> interruptedSurface?.let { "Returned from $it" } ?: "Returned to your intention"
+            AttentionSubtype.ALLOW_ANYWAY -> interruptedSurface?.let { "Continued on $it" } ?: "Continued after a detour"
+            AttentionSubtype.END_TUNNEL -> interruptedSurface?.let { "Ended after $it" } ?: "Ended the Task Tunnel"
+            else -> null
+        }
+    }
+
+    val checkInDecision = episode.events.lastOrNull {
+        it.subtype in setOf(
+            AttentionSubtype.CHECK_IN_RETURN,
+            AttentionSubtype.CHECK_IN_CONTINUE,
+            AttentionSubtype.CHECK_IN_END,
+            AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER,
+        )
+    }
+    if (checkInDecision != null) {
+        return when (checkInDecision.subtype) {
+            AttentionSubtype.CHECK_IN_RETURN -> "Returned at a check-in"
+            AttentionSubtype.CHECK_IN_CONTINUE -> "Continued at a check-in"
+            AttentionSubtype.CHECK_IN_END -> "Ended at a check-in"
+            AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER -> "Changed purpose at a check-in"
+            else -> null
+        }
+    }
+
+    val expiryDecision = episode.events.lastOrNull {
+        it.subtype in setOf(
+            AttentionSubtype.EXPIRY_FINISH,
+            AttentionSubtype.EXPIRY_CONTINUE,
+            AttentionSubtype.EXPIRY_CHOOSE_ANOTHER,
+        )
+    }
+    if (expiryDecision != null) {
+        return when (expiryDecision.subtype) {
+            AttentionSubtype.EXPIRY_FINISH -> "Finished at the time limit"
+            AttentionSubtype.EXPIRY_CONTINUE -> "Continued after the time limit"
+            AttentionSubtype.EXPIRY_CHOOSE_ANOTHER -> "Changed purpose at the time limit"
+            else -> null
+        }
+    }
+
+    return episode.events.lastOrNull { it.subtype == AttentionSubtype.SURFACE_INTERVENTION }
+        ?.surface
+        ?.let(::surfaceLabel)
+        ?.let { "$it needs a decision" }
+}
+
+/**
+ * Turns the raw event stream into a short story. Routine surface transitions are omitted on
+ * purpose; they remain stored for Review/analytics but do not belong in casual product UI.
+ */
+fun episodeStory(episode: AttentionEpisode): List<AttentionStoryItem> {
+    val items = mutableListOf<AttentionStoryItem>()
+
+    episode.events.forEach { event ->
+        val text = when (event.subtype) {
+            AttentionSubtype.PURPOSE_SELECTED -> "Started with ${taskLabel(event.task)}"
+            AttentionSubtype.SURFACE_INTERVENTION -> "Opened ${surfaceLabel(event.surface)}"
+            AttentionSubtype.SURFACE_RETURNED -> "Returned to ${surfaceLabel(event.surface)}"
+            AttentionSubtype.SESSION_EXPIRED -> "Time limit ended"
+            AttentionSubtype.DRIFT_SEQUENCE -> null
+            AttentionSubtype.DRIFT_CHECK_IN -> "Task Tunnel checked in"
+            AttentionSubtype.RETURN -> "You chose to go back"
+            AttentionSubtype.ALLOW_ANYWAY -> "You chose to continue"
+            AttentionSubtype.END_TUNNEL -> "You ended the Task Tunnel"
+            AttentionSubtype.KEEP_GOING -> "You chose to keep going"
+            AttentionSubtype.SET_INTENTION -> "You chose to set an intention"
+            AttentionSubtype.EXPIRY_FINISH -> "You finished the session"
+            AttentionSubtype.EXPIRY_CONTINUE -> "You continued for another session"
+            AttentionSubtype.EXPIRY_CHOOSE_ANOTHER -> "You chose another purpose"
+            AttentionSubtype.CHECK_IN_SHOWN -> "Task Tunnel checked in"
+            AttentionSubtype.CHECK_IN_RETURN -> "You returned to your intention"
+            AttentionSubtype.CHECK_IN_CONTINUE -> "You chose to continue"
+            AttentionSubtype.CHECK_IN_END -> "You ended the Task Tunnel"
+            AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER -> "You chose another purpose"
+            AttentionSubtype.SURFACE_ENTERED -> null
+        }
+        if (text != null && items.lastOrNull()?.text != text) {
+            items += AttentionStoryItem(event.timestampMillis, text)
+        }
+    }
+
+    return items
+}

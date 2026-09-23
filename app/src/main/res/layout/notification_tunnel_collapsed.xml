@@ -40,7 +40,7 @@
                 android:includeFontPadding="false"
                 android:maxLines="1"
                 android:textColor="@color/notification_text_secondary"
-                android:textSize="10sp" />
+                android:textSize="11sp" />
 
             <LinearLayout
                 android:id="@+id/notification_compact_context_row"
@@ -68,7 +68,7 @@
                     android:includeFontPadding="false"
                     android:maxLines="1"
                     android:textColor="@color/notification_text_secondary"
-                    android:textSize="10sp"
+                    android:textSize="11sp"
                     android:visibility="gone" />
             </LinearLayout>
         </LinearLayout>

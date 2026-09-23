@@ -53,10 +53,12 @@ import com.example.tasktunnel.friction.FrictionContext
 import com.example.tasktunnel.friction.FrictionOutcome
 import com.example.tasktunnel.friction.InterventionVariant
 import com.example.tasktunnel.notification.TunnelNotificationController
+import com.example.tasktunnel.onboarding.OnboardingPreferences
 import com.example.tasktunnel.protection.ProtectionMasterPreferences
 import com.example.tasktunnel.tunnel.DetectedSurface
 import com.example.tasktunnel.tunnel.IntentionCheckInKind
 import com.example.tasktunnel.tunnel.IntentionalCheckInPreferences
+import com.example.tasktunnel.tunnel.LastPurposePreferences
 import com.example.tasktunnel.tunnel.SupportedApp
 import com.example.tasktunnel.tunnel.TunnelCoordinator
 import com.example.tasktunnel.tunnel.TunnelPrompt
@@ -602,13 +604,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         return try {
             getSystemService(WindowManager::class.java).addView(layout, params)
             visualQaOverlayView = layout
-            if (overlay == VisualQaOverlay.PURPOSE_GATE) {
-                layout.alpha = 0f
-                layout.translationY = dp(28).toFloat()
-                layout.animate().alpha(1f).translationY(0f).setDuration(150L).start()
-            } else {
-                animateOverlayEntrance(layout)
-            }
             handler.postDelayed({ if (visualQaOverlayView === layout) removeVisualQaOverlay() }, VISUAL_QA_TIMEOUT_MS)
             true
         } catch (_: RuntimeException) {
@@ -731,7 +726,18 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun scheduleCapture(minDelayMillis: Long = 0L) {
         if (!protectionEnabled) return
         val elapsed = SystemClock.elapsedRealtime()
-        val throttleDelay = CAPTURE_THROTTLE_MS - (elapsed - lastCaptureAtElapsed)
+        val tunnelState = tunnelCoordinator.state
+        val activeTunnelAwaitingSurface = tunnelState.prompt == null &&
+            tunnelState.activeSession?.let { session ->
+                session.status == TunnelStatus.ACTIVE &&
+                    session.app.packageName == tunnelState.foregroundPackage
+            } == true
+        val throttleWindow = if (activeTunnelAwaitingSurface) {
+            ACTIVE_TUNNEL_CAPTURE_THROTTLE_MS
+        } else {
+            CAPTURE_THROTTLE_MS
+        }
+        val throttleDelay = throttleWindow - (elapsed - lastCaptureAtElapsed)
         val delay = maxOf(throttleDelay, minDelayMillis)
         handler.removeCallbacks(trailingCapture)
         if (delay <= 0) captureCurrentRoot() else handler.postDelayed(trailingCapture, delay)
@@ -1275,19 +1281,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         try {
             getSystemService(WindowManager::class.java).addView(layout, params)
             surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
-            val isPurposeGate = prompt is TunnelPrompt.PurposeGate
-            if (isPurposeGate) {
-                layout.alpha = 0f
-                layout.translationY = dp(28).toFloat()
-                layout.animate()
-                    .alpha(1f)
-                    .translationY(0f)
-                    .setDuration(200L)
-                    .setInterpolator(android.view.animation.DecelerateInterpolator())
-                    .start()
-            } else {
-                animateOverlayEntrance(layout)
-            }
             tunnelOverlayView = layout
             shownTunnelPrompt = prompt
             attentionRecorder.tunnelPromptShown(
@@ -1358,7 +1351,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         try {
             getSystemService(WindowManager::class.java).addView(layout, params)
             surfaceUsageTracker.setOverlayVisible(true, System.currentTimeMillis())
-            animateOverlayEntrance(layout)
             driftOverlayView = layout
             driftCoordinator.markCheckInShown(episode.id)
             attentionRecorder.driftCheckInShown(episode, System.currentTimeMillis())
@@ -1426,83 +1418,68 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun purposeGateView(prompt: TunnelPrompt.PurposeGate) = baseTunnelOverlay(compact = true).apply {
         var selectedDurationMillis: Long? = prompt.preservedDurationMillis
         var durationWasChanged = false
-        val durationForStart = {
-            if (prompt.replacingSessionId != null && !durationWasChanged) {
-                tunnelCoordinator.state.activeSession
-                    ?.takeIf { it.id == prompt.replacingSessionId && it.status == TunnelStatus.ACTIVE }
-                    ?.expiresAtMillis
-                    ?.let { (it - System.currentTimeMillis()).coerceAtLeast(1L) }
-            } else {
-                selectedDurationMillis
+        val lastPurpose = if (prompt.replacingSessionId == null) {
+            LastPurposePreferences.load(this@TaskTunnelAccessibilityService, prompt.app)
+        } else {
+            null
+        }
+        val rememberedDurations = if (prompt.replacingSessionId == null) {
+            purposeChoices(prompt.app).mapNotNull { choice ->
+                rememberedDurationChoice(choice.task)?.let { choice.task to it }
+            }.toMap()
+        } else {
+            emptyMap()
+        }
+        val initialRememberedDuration = lastPurpose?.let { rememberedDurations[it] }
+        val durationForStart = { task: TunnelTask ->
+            when {
+                prompt.replacingSessionId != null && !durationWasChanged -> {
+                    tunnelCoordinator.state.activeSession
+                        ?.takeIf { it.id == prompt.replacingSessionId && it.status == TunnelStatus.ACTIVE }
+                        ?.expiresAtMillis
+                        ?.let { (it - System.currentTimeMillis()).coerceAtLeast(1L) }
+                }
+                durationWasChanged -> selectedDurationMillis
+                rememberedDurations.containsKey(task) -> rememberedDurations.getValue(task).durationMillis
+                else -> selectedDurationMillis
             }
         }
         addView(purposeGateAppIdentity(prompt.app))
         addView(purposeGateQuestion())
-        val durationSelector = purposeDurationSelector()
+        val durationSelector = purposeDurationSelector().apply {
+            initialRememberedDuration?.let { selectDuration(it.durationMillis) }
+        }
         val durationValue = TextView(context).apply {
-            text = prompt.preservedDurationMillis?.let(::formatRemainingDuration) ?: DURATION_CHOICES.first().label
+            text = when {
+                prompt.preservedDurationMillis != null -> formatRemainingDuration(prompt.preservedDurationMillis)
+                rememberedDurations.isNotEmpty() -> "By purpose"
+                else -> DURATION_CHOICES.first().label
+            }
             textSize = 14f
             setTextColor(COLOR_SECONDARY_TEXT)
         }
-        when (prompt.app) {
-            SupportedApp.INSTAGRAM -> {
-                addView(purposeChoiceRow(R.drawable.ic_purpose_message, "Reply to messages", "Go straight to conversations") { view ->
+        val choices = purposeChoices(prompt.app)
+        val orderedChoices = choices.firstOrNull { it.task == lastPurpose }
+            ?.let { remembered -> listOf(remembered) + choices.filterNot { it.task == remembered.task } }
+            ?: choices
+        orderedChoices.forEachIndexed { index, choice ->
+            addView(
+                purposeChoiceRow(
+                    iconRes = choice.iconRes,
+                    title = choice.title,
+                    subtitle = choice.subtitle,
+                    lastUsed = choice.task == lastPurpose,
+                    rememberedDurationLabel = rememberedDurations[choice.task]?.label,
+                ) { view ->
                     view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.INSTAGRAM_MESSAGES, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / look something up", "Find an account, post, or topic") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.INSTAGRAM_SEARCH, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_create, "Post something", "Create without falling into the feed") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.INSTAGRAM_POST, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.INSTAGRAM_BROWSE, durationForStart())
-                })
-            }
-            SupportedApp.YOUTUBE -> {
-                addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.YOUTUBE_SEARCH_WATCH, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_subscriptions, "Check subscriptions", "See new videos from channels you chose") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.YOUTUBE_SUBSCRIPTIONS, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_shorts, "Watch Shorts intentionally", "Short-form, but on purpose") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.YOUTUBE_SHORTS, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.YOUTUBE_BROWSE, durationForStart())
-                })
-            }
-            SupportedApp.TIKTOK -> {
-                addView(purposeChoiceRow(R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.TIKTOK_SEARCH_WATCH, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_message, "Check Inbox", "Check messages and notifications") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.TIKTOK_INBOX, durationForStart())
-                })
-                addView(overlayDivider())
-                addView(purposeChoiceRow(R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms") { view ->
-                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    startTunnel(TunnelTask.TIKTOK_BROWSE, durationForStart())
-                })
-            }
+                    startTunnel(
+                        task = choice.task,
+                        intendedDurationMillis = durationForStart(choice.task),
+                        rememberDuration = prompt.replacingSessionId == null || durationWasChanged,
+                    )
+                },
+            )
+            if (index != orderedChoices.lastIndex) addView(overlayDivider())
         }
         lateinit var timeLimitRow: View
         timeLimitRow = purposeTimeLimitRow(durationValue) {
@@ -1540,7 +1517,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             val session = tunnelCoordinator.state.activeSession
             val nowMillis = System.currentTimeMillis()
             val directedDestination = prompt.task.hasDirectedDestination()
-            if (tunnelCoordinator.returnFromIntervention(nowMillis, addReturnCooldown = !directedDestination)) {
+            // Keep the just-dismissed detour suppressed during the overlay -> directed-navigation
+            // handoff. Without this brief coordinator-owned cooldown, a trailing capture of the
+            // same disallowed surface can recreate the intervention before routing starts, causing
+            // navigateToTaskDestinationAfterOverlayDismiss() to abort because a prompt is visible.
+            if (tunnelCoordinator.returnFromIntervention(nowMillis, addReturnCooldown = true)) {
                 session?.let {
                     attentionRecorder.tunnelDecision(
                         it,
@@ -1554,7 +1535,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     recordFrictionOutcome(prompt, variant, FrictionOutcome.RETURN)
                 }
                 updateTunnelUi()
-                if (prompt.task.hasDirectedDestination()) {
+                if (directedDestination) {
                     navigateToTaskDestinationAfterOverlayDismiss(prompt.task)
                 } else {
                     performGlobalAction(GLOBAL_ACTION_BACK)
@@ -1569,7 +1550,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 }
                 if (session != null) {
                     val nowMillis = System.currentTimeMillis()
-                    if (tunnelCoordinator.returnFromIntervention(nowMillis, addReturnCooldown = false)) {
+                    if (tunnelCoordinator.returnFromIntervention(nowMillis, addReturnCooldown = true)) {
                         attentionRecorder.tunnelDecision(
                             session,
                             AttentionSubtype.RETURN,
@@ -1865,7 +1846,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         })
     }
 
-    private fun startTunnel(task: TunnelTask, intendedDurationMillis: Long?) {
+    private fun startTunnel(
+        task: TunnelTask,
+        intendedDurationMillis: Long?,
+        rememberDuration: Boolean = true,
+    ) {
         val nowMillis = System.currentTimeMillis()
         val stateBeforeStart = tunnelCoordinator.state
         val alreadyAtDestination = stateBeforeStart.foregroundPackage == task.app.packageName &&
@@ -1883,6 +1868,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             updateTunnelUi()
             return
         }
+        LastPurposePreferences.save(
+            context = applicationContext,
+            task = task,
+            intendedDurationMillis = intendedDurationMillis,
+            rememberDuration = rememberDuration,
+        )
+        OnboardingPreferences.markFirstTunnelStarted(applicationContext)
         tunnelCoordinator.state.activeSession?.let { attentionRecorder.purposeSelected(it, nowMillis) }
         updateTunnelUi()
         if (directedDestination) {
@@ -2817,10 +2809,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun baseTunnelOverlay(compact: Boolean = false) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(20), dp(10), dp(20), dp(if (compact) 16 else 20) + navigationBarInset())
+        setPadding(dp(20), dp(12), dp(20), dp(if (compact) 16 else 20) + navigationBarInset())
         background = GradientDrawable().apply {
             setColor(COLOR_SHEET)
-            cornerRadii = floatArrayOf(dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), dp(28).toFloat(), 0f, 0f, 0f, 0f)
+            cornerRadii = floatArrayOf(dp(24).toFloat(), dp(24).toFloat(), dp(24).toFloat(), dp(24).toFloat(), 0f, 0f, 0f, 0f)
         }
         elevation = dp(12).toFloat()
         addView(View(context).apply {
@@ -2834,9 +2826,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private fun overlayText(value: String, heading: Boolean = false, secondary: Boolean = false) = TextView(this).apply {
         text = value
         setTextColor(if (secondary) COLOR_SECONDARY_TEXT else COLOR_PRIMARY_TEXT)
-        textSize = if (heading) 23f else 15f
+        textSize = if (heading) 22f else 15f
         if (heading) setTypeface(typeface, android.graphics.Typeface.BOLD)
-        setLineSpacing(0f, 1.08f)
+        setLineSpacing(0f, 1.12f)
         setPadding(0, 0, 0, if (heading) dp(10) else dp(18))
     }
 
@@ -2847,7 +2839,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         setTextColor(COLOR_ON_PRIMARY)
         minHeight = dp(50)
         background = RippleDrawable(
-            ColorStateList.valueOf(COLOR_ON_PRIMARY),
+            ColorStateList.valueOf(COLOR_PRIMARY_BUTTON_RIPPLE),
             GradientDrawable().apply {
                 setColor(COLOR_PRIMARY)
                 cornerRadius = dp(12).toFloat()
@@ -2865,10 +2857,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         minHeight = dp(48)
         isClickable = true
         isFocusable = true
-        if (quiet) {
-            setBackgroundResource(android.R.drawable.list_selector_background)
+        background = if (quiet) {
+            overlayRowBackground(radiusDp = 12)
         } else {
-            background = RippleDrawable(
+            RippleDrawable(
                 ColorStateList.valueOf(COLOR_PRIMARY_RIPPLE),
                 GradientDrawable().apply {
                     setColor(COLOR_TONAL_ACTION)
@@ -2924,7 +2916,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         minHeight = dp(58)
         isClickable = true
         isFocusable = true
-        setBackgroundResource(android.R.drawable.list_selector_background)
+        background = overlayRowBackground()
         setOnClickListener { action(this) }
     }
 
@@ -2950,10 +2942,39 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         setPadding(0, 0, 0, dp(8))
     }
 
+    private data class PurposeChoice(
+        val task: TunnelTask,
+        val iconRes: Int,
+        val title: String,
+        val subtitle: String,
+    )
+
+    private fun purposeChoices(app: SupportedApp): List<PurposeChoice> = when (app) {
+        SupportedApp.INSTAGRAM -> listOf(
+            PurposeChoice(TunnelTask.INSTAGRAM_MESSAGES, R.drawable.ic_purpose_message, "Reply to messages", "Go straight to conversations"),
+            PurposeChoice(TunnelTask.INSTAGRAM_SEARCH, R.drawable.ic_purpose_search, "Search / look something up", "Find an account, post, or topic"),
+            PurposeChoice(TunnelTask.INSTAGRAM_POST, R.drawable.ic_purpose_create, "Post something", "Create without falling into the feed"),
+            PurposeChoice(TunnelTask.INSTAGRAM_BROWSE, R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms"),
+        )
+        SupportedApp.YOUTUBE -> listOf(
+            PurposeChoice(TunnelTask.YOUTUBE_SEARCH_WATCH, R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch"),
+            PurposeChoice(TunnelTask.YOUTUBE_SUBSCRIPTIONS, R.drawable.ic_purpose_subscriptions, "Check subscriptions", "See new videos from channels you chose"),
+            PurposeChoice(TunnelTask.YOUTUBE_SHORTS, R.drawable.ic_purpose_shorts, "Watch Shorts intentionally", "Short-form, but on purpose"),
+            PurposeChoice(TunnelTask.YOUTUBE_BROWSE, R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms"),
+        )
+        SupportedApp.TIKTOK -> listOf(
+            PurposeChoice(TunnelTask.TIKTOK_SEARCH_WATCH, R.drawable.ic_purpose_search, "Search / watch something specific", "Find what you came to watch"),
+            PurposeChoice(TunnelTask.TIKTOK_INBOX, R.drawable.ic_purpose_message, "Check Inbox", "Check messages and notifications"),
+            PurposeChoice(TunnelTask.TIKTOK_BROWSE, R.drawable.ic_purpose_browse, "Browse intentionally", "Explore on your terms"),
+        )
+    }
+
     private fun purposeChoiceRow(
         iconRes: Int,
         title: String,
         subtitle: String,
+        lastUsed: Boolean = false,
+        rememberedDurationLabel: String? = null,
         action: (View) -> Unit,
     ) = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
@@ -2961,8 +2982,13 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         setPadding(dp(2), dp(8), dp(4), dp(8))
         isClickable = true
         isFocusable = true
-        setBackgroundResource(android.R.drawable.list_selector_background)
-        contentDescription = "$title. $subtitle"
+        background = overlayRowBackground()
+        contentDescription = buildString {
+            append(title)
+            if (lastUsed) append(". Last used")
+            rememberedDurationLabel?.let { append(". Last time limit $it") }
+            append(". $subtitle")
+        }
         addView(ImageView(context).apply {
             setImageResource(iconRes)
             imageTintList = ColorStateList.valueOf(COLOR_SECONDARY_TEXT)
@@ -2970,6 +2996,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(14) })
         addView(LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
+            if (lastUsed) {
+                addView(TextView(context).apply {
+                    text = "Last used"
+                    textSize = 11f
+                    setTextColor(COLOR_SECONDARY_TEXT)
+                    setPadding(0, 0, 0, dp(1))
+                })
+            }
             addView(TextView(context).apply {
                 text = title
                 textSize = 16f
@@ -2984,6 +3018,21 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 maxLines = 1
             })
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        rememberedDurationLabel?.let { label ->
+            addView(TextView(context).apply {
+                text = label
+                textSize = 12f
+                setTextColor(COLOR_PRIMARY)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                background = GradientDrawable().apply {
+                    setColor(COLOR_TONAL_ACTION)
+                    cornerRadius = dp(8).toFloat()
+                }
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(8) })
+        }
         setOnClickListener { action(this) }
     }
 
@@ -2993,7 +3042,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         setPadding(dp(2), dp(4), dp(4), dp(2))
         isClickable = true
         isFocusable = true
-        setBackgroundResource(android.R.drawable.list_selector_background)
+        background = overlayRowBackground()
         addView(TextView(context).apply {
             text = "Time limit"
             textSize = 14f
@@ -3011,11 +3060,25 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         minHeight = dp(48)
         isClickable = true
         isFocusable = true
-        setBackgroundResource(android.R.drawable.list_selector_background)
+        background = overlayRowBackground(radiusDp = 12)
         setOnClickListener { action() }
     }
 
+    private fun overlayRowBackground(radiusDp: Int = 10) = RippleDrawable(
+        ColorStateList.valueOf(COLOR_PRIMARY_RIPPLE),
+        GradientDrawable().apply {
+            setColor(COLOR_TRANSPARENT)
+            cornerRadius = dp(radiusDp).toFloat()
+        },
+        null,
+    )
+
     private fun purposeDurationSelector(): PurposeDurationSelector = PurposeDurationSelector()
+
+    private fun rememberedDurationChoice(task: TunnelTask): DurationChoice? {
+        val remembered = LastPurposePreferences.loadDuration(applicationContext, task) ?: return null
+        return DURATION_CHOICES.firstOrNull { it.durationMillis == remembered.durationMillis }
+    }
 
     private inner class PurposeDurationSelector : LinearLayout(this@TaskTunnelAccessibilityService) {
         var onDurationSelected: ((DurationChoice) -> Unit)? = null
@@ -3047,6 +3110,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 })
             }
             updateSelection()
+        }
+
+        fun selectDuration(durationMillis: Long?) {
+            val index = DURATION_CHOICES.indexOfFirst { it.durationMillis == durationMillis }
+            if (index >= 0) {
+                selectedIndex = index
+                updateSelection()
+            }
         }
 
         private fun updateSelection() {
@@ -3099,17 +3170,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             }
             addView(appIconView(packageName, label), LinearLayout.LayoutParams(dp(28), dp(28)))
         }
-    }
-
-    private fun animateOverlayEntrance(layout: View) {
-        layout.alpha = 0f
-        layout.translationY = dp(28).toFloat()
-        layout.animate()
-            .alpha(1f)
-            .translationY(0f)
-            .setDuration(200L)
-            .setInterpolator(android.view.animation.DecelerateInterpolator())
-            .start()
     }
 
     private fun appIconView(packageName: String, displayName: String): View = runCatching {
@@ -3375,6 +3435,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         private const val MAX_HISTORY = 8
         private const val MAX_FIELD_LENGTH = 200
         private const val CAPTURE_THROTTLE_MS = 1_000L
+        // While a live tunnel owns the foreground and no prompt is already visible, surface
+        // classification directly controls intervention latency. Keep this responsive without
+        // increasing the steady-state capture rate used outside active tunnel decisions.
+        private const val ACTIVE_TUNNEL_CAPTURE_THROTTLE_MS = 400L
         private const val YOUTUBE_SUBSCRIPTION_PROBE_ATTEMPTS = 2
         private const val YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS = 650L
         private const val DEADLINE_RETRY_MS = 1_000L
@@ -3400,6 +3464,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         private const val COLOR_PRIMARY = 0xFF79AFFF.toInt()
         private const val COLOR_ON_PRIMARY = 0xFF061A32.toInt()
         private const val COLOR_PRIMARY_RIPPLE = 0x3379AFFF
+        private const val COLOR_PRIMARY_BUTTON_RIPPLE = 0x33061A32
+        private const val COLOR_TRANSPARENT = 0x00000000
         private const val COLOR_TONAL_ACTION = 0xFF14345F.toInt()
         private const val COLOR_DURATION_SELECTED = COLOR_TONAL_ACTION
         private val DURATION_CHOICES = listOf(

@@ -6,6 +6,7 @@ import androidx.compose.ui.graphics.Color
 val Canvas = Color(0xFF101214)
 val SurfaceGraphite = Color(0xFF191C1F)
 val SurfaceRaised = Color(0xFF202428)
+val SurfaceHigh = Color(0xFF292E33)
 val TextPrimary = Color(0xFFF1F3F4)
 val TextSecondary = Color(0xFFA7ADB4)
 val Divider = Color(0xFF2A2E32)

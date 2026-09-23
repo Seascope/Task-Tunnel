@@ -33,7 +33,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -42,12 +44,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -57,30 +61,25 @@ import com.example.tasktunnel.BuildConfig
 import com.example.tasktunnel.accessibility.AccessibilityState
 import com.example.tasktunnel.attention.AttentionEpisode
 import com.example.tasktunnel.attention.AttentionEpisodeType
-import com.example.tasktunnel.attention.AttentionEvent
-import com.example.tasktunnel.attention.AttentionEventType
-import com.example.tasktunnel.attention.AttentionPattern
-import com.example.tasktunnel.attention.AttentionPatternType
 import com.example.tasktunnel.attention.AttentionReview
 import com.example.tasktunnel.attention.AttentionUiState
-import com.example.tasktunnel.attention.DailyAttentionRecap
-import com.example.tasktunnel.attention.ReviewPeriod
-import com.example.tasktunnel.attention.ReviewDaySummary
+import com.example.tasktunnel.attention.AttentionStoryItem
 import com.example.tasktunnel.attention.ReviewPeriodSummary
-import com.example.tasktunnel.attention.ReviewTrend
-import com.example.tasktunnel.attention.ReviewTrendType
+import com.example.tasktunnel.attention.ReviewInsight
+import com.example.tasktunnel.attention.ReviewInsightFactory
+import com.example.tasktunnel.attention.ReviewInsightType
 import com.example.tasktunnel.attention.SevenDayReview
-import com.example.tasktunnel.attention.episodeSubtitle
-import com.example.tasktunnel.attention.episodeTitle
-import com.example.tasktunnel.attention.eventDescription
-import com.example.tasktunnel.attention.patternHeadline
-import com.example.tasktunnel.attention.patternSupportingText
-import com.example.tasktunnel.attention.surfaceLabel
 import com.example.tasktunnel.attention.taskLabel
+import com.example.tasktunnel.attention.episodeStory
 import com.example.tasktunnel.drift.KnownDriftApp
+import com.example.tasktunnel.feedback.FeedbackCategory
+import com.example.tasktunnel.feedback.FeedbackDraft
+import com.example.tasktunnel.feedback.FeedbackStatusReport
+import com.example.tasktunnel.feedback.FeedbackSubmissionResult
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.onboarding.OnboardingProgress
 import com.example.tasktunnel.onboarding.OnboardingStep
+import com.example.tasktunnel.onboarding.SetupChecklistState
 import com.example.tasktunnel.protection.AppCompatibility
 import com.example.tasktunnel.protection.DeveloperDiagnosticsGate
 import com.example.tasktunnel.protection.DiagnosticReport
@@ -92,8 +91,12 @@ import com.example.tasktunnel.ui.theme.BrandBlueContainer
 import com.example.tasktunnel.ui.theme.HealthyGreen
 import com.example.tasktunnel.ui.theme.LimitedAmber
 import com.example.tasktunnel.ui.theme.SurfaceRaised
+import com.example.tasktunnel.tunnel.TunnelSession
 import com.example.tasktunnel.ui.theme.TaskTunnelTokens
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Locale
 
 @Composable
 fun AttentionScreen(
@@ -104,37 +107,135 @@ fun AttentionScreen(
     reviewProtection: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val today = uiState.episodes.filter { isToday(it.startedAtMillis) }
-    val earlier = uiState.episodes.filterNot { isToday(it.startedAtMillis) }
+    val activeSession = runtime.tunnelState.activeSession
+    val activeEpisodeId = activeSession?.id?.let { "tunnel:$it" }
+    val activeDayStart = activeSession?.startedAtMillis?.let(::startOfLocalDay)
+    val episodesByDay = uiState.episodes.groupBy { startOfLocalDay(it.startedAtMillis) }
+    val dayStarts = (episodesByDay.keys + listOfNotNull(activeDayStart)).distinct().sortedDescending()
+    val activeHasEpisode = activeEpisodeId != null && uiState.episodes.any { it.id == activeEpisodeId }
+
     LazyColumn(
         modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = TaskTunnelTokens.ScreenHorizontalPadding, top = 8.dp, end = TaskTunnelTokens.ScreenHorizontalPadding, bottom = 28.dp),
+        contentPadding = PaddingValues(
+            start = TaskTunnelTokens.ScreenHorizontalPadding,
+            top = 8.dp,
+            end = TaskTunnelTokens.ScreenHorizontalPadding,
+            bottom = 28.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        item {
-            if (health.level != ProtectionLevel.ACTIVE) {
+        if (health.level != ProtectionLevel.ACTIVE) {
+            item {
                 ProtectionRepairRow(health, reviewProtection)
-                Spacer(Modifier.height(6.dp))
             }
         }
-        runtime.tunnelState.activeSession?.let { session ->
-            item {
-                ActiveTunnelNotice(session.app.packageName, session.app.displayName, taskLabel(session.task))
-                Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-            }
-        }
-        item { SectionHeader("Today", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap)) }
+
         when {
-            !uiState.historyAvailable -> item { ErrorNotice("Attention history is unavailable", "Protection can still run. Reopen Task Tunnel and check diagnostics if this continues.") }
-            uiState.episodes.isEmpty() -> item { EmptyState("No episodes yet", "Intentions, meaningful transitions, Drift check-ins, and your choices will appear here. History stays on this device.") }
-            today.isEmpty() -> item { EmptyState("Nothing recorded today", "Recent episodes are available below.") }
-            else -> episodeItems(today, openEpisode)
-        }
-        if (earlier.isNotEmpty()) {
-            item {
-                Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-                SectionHeader("Earlier", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            !uiState.historyAvailable -> item {
+                ErrorNotice(
+                    "Activity history is unavailable",
+                    "Task Tunnel can still protect you. Reopen the app and try again.",
+                )
             }
-            episodeItems(earlier, openEpisode)
+            dayStarts.isEmpty() -> item {
+                EmptyState(
+                    "Nothing here yet",
+                    "Recent Task Tunnels and Drift check-ins will appear here.",
+                )
+            }
+            else -> {
+                items(dayStarts, key = { it }) { dayStart ->
+                    val episodes = episodesByDay[dayStart].orEmpty()
+                    val fallbackActiveSession = activeSession?.takeIf {
+                        activeDayStart == dayStart && !activeHasEpisode
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SectionHeader(attentionDayLabel(dayStart))
+                        AttentionDayCard(
+                            episodes = episodes,
+                            activeSession = fallbackActiveSession,
+                            activeEpisodeId = activeEpisodeId,
+                            openEpisode = openEpisode,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttentionDayCard(
+    episodes: List<AttentionEpisode>,
+    activeSession: TunnelSession?,
+    activeEpisodeId: String?,
+    openEpisode: (AttentionEpisode) -> Unit,
+) {
+    val rowCount = episodes.size + if (activeSession != null) 1 else 0
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised),
+    ) {
+        var renderedRows = 0
+        if (activeSession != null) {
+            ActiveSessionRow(activeSession)
+            renderedRows += 1
+            if (renderedRows < rowCount) AttentionRowDivider()
+        }
+        episodes.forEachIndexed { index, episode ->
+            if (episode.type == AttentionEpisodeType.DRIFT) {
+                DriftEpisodeRow(episode = episode, onClick = { openEpisode(episode) })
+            } else {
+                EpisodeRow(
+                    episode = episode,
+                    onClick = { openEpisode(episode) },
+                    isLive = episode.id == activeEpisodeId,
+                )
+            }
+            renderedRows += 1
+            if (renderedRows < rowCount) AttentionRowDivider()
+        }
+    }
+}
+
+@Composable
+private fun AttentionRowDivider() {
+    RowDivider(modifier = Modifier.padding(horizontal = 14.dp), inset = true)
+}
+
+@Composable
+private fun ActiveSessionRow(session: TunnelSession) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        AppIcon(session.app.packageName, session.app.displayName, Modifier.size(TaskTunnelTokens.AppIconSize))
+        Spacer(Modifier.width(TaskTunnelTokens.IconTextGap))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    session.app.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    formatTime(session.startedAtMillis),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                "${taskLabel(session.task)} · Live",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -159,60 +260,84 @@ fun ReviewScreen(
     historyAvailable: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    var selectedPeriod by remember { mutableStateOf(ReviewPeriod.TODAY) }
+    val insights = remember(review.patterns) { ReviewInsightFactory.create(review.patterns) }
     if (!historyAvailable || (!review.hasMeaningfulData && !sevenDayReview.hasMeaningfulHistory)) {
-        Column(modifier.padding(TaskTunnelTokens.ScreenHorizontalPadding, 18.dp)) {
-            Text("Nothing to review yet", style = MaterialTheme.typography.titleLarge)
-            Text(
-                "Your daily recap will appear after Task Tunnel records some intentional sessions.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
+        EmptyState(
+            title = "Nothing to review yet",
+            body = "Useful patterns will appear after Task Tunnel has enough recent history.",
+            modifier = modifier.padding(horizontal = TaskTunnelTokens.ScreenHorizontalPadding),
+        )
         return
     }
 
     Column(
-        modifier = modifier.verticalScroll(rememberScrollState()).padding(
-            horizontal = TaskTunnelTokens.ScreenHorizontalPadding,
-            vertical = 14.dp,
-        ),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(
+                horizontal = TaskTunnelTokens.ScreenHorizontalPadding,
+                vertical = 14.dp,
+            ),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        ReviewPeriodSwitcher(selectedPeriod) { selectedPeriod = it }
-        when (selectedPeriod) {
-            ReviewPeriod.TODAY -> TodayReviewContent(review)
-            ReviewPeriod.SEVEN_DAYS -> SevenDayReviewContent(sevenDayReview)
+        Text(
+            "Patterns from recent use",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        if (insights.isEmpty()) {
+            ReviewNoPatternCard()
+        } else {
+            ReviewInsightsCard(insights)
+        }
+
+        if (sevenDayReview.hasMeaningfulHistory) {
+            WeeklySummaryDisclosure(sevenDayReview.summary)
         }
     }
 }
 
 @Composable
-private fun ReviewPeriodSwitcher(selected: ReviewPeriod, onSelected: (ReviewPeriod) -> Unit) {
-    Row(
-        Modifier
+private fun ReviewInsightsCard(insights: List<ReviewInsight>) {
+    Column(
+        modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f))
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised)
+            .padding(horizontal = 16.dp),
     ) {
-        ReviewPeriod.entries.forEach { period ->
-            val isSelected = period == selected
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (isSelected) SurfaceRaised else androidx.compose.ui.graphics.Color.Transparent)
-                    .clickable { onSelected(period) }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center,
-            ) {
+        insights.forEachIndexed { index, insight ->
+            if (index > 0) RowDivider(inset = true)
+            ReviewInsightRow(insight, Modifier.padding(vertical = 16.dp))
+        }
+    }
+}
+
+@Composable
+private fun ReviewInsightRow(insight: ReviewInsight, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        ReviewInsightMarker(insight)
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(insight.headline, style = MaterialTheme.typography.titleMedium)
+            if (insight.type == ReviewInsightType.DRIFT_PATH && insight.packageSequence.isNotEmpty()) {
                 Text(
-                    text = if (period == ReviewPeriod.TODAY) "Today" else "7 days",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    insight.packageSequence.joinToString(" → ") { DriftAppCatalog.labelFor(context, it) },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            Text(
+                insight.supportingText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            insight.detailText?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -220,340 +345,255 @@ private fun ReviewPeriodSwitcher(selected: ReviewPeriod, onSelected: (ReviewPeri
 }
 
 @Composable
-private fun TodayReviewContent(review: AttentionReview) {
-    SectionHeader("Today")
-    ReviewTodayHero(review.recap)
-    ReviewPatterns(review.patterns)
-}
-
-@Composable
-private fun SevenDayReviewContent(review: SevenDayReview) {
-    if (!review.hasMeaningfulHistory) {
-        SectionHeader("7 days")
-        Text("Not much to review yet.", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "Your 7-day view will become more useful as Task Tunnel records more intentional sessions.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        return
-    }
-    SectionHeader("7 days")
-    ReviewSevenDayHero(review.summary)
-    SectionHeader("This week")
-    ReviewRhythm(review.days)
-    SectionHeader("Trends")
-    if (review.trends.isEmpty()) {
-        Text("Not enough earlier history to compare yet.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } else {
-        review.trends.forEachIndexed { index, trend ->
-            if (index > 0) RowDivider()
-            ReviewTrendRow(trend, Modifier.padding(vertical = 9.dp))
-        }
-    }
-    ReviewPatterns(review.patterns)
-}
-
-@Composable
-private fun ReviewPatterns(patterns: List<AttentionPattern>) {
-    SectionHeader("Patterns")
-    if (patterns.isEmpty()) {
-        Text("A little more history is needed before patterns become useful.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
-    } else {
-        patterns.forEachIndexed { index, pattern ->
-            if (index > 0) RowDivider()
-            PatternRow(pattern, Modifier.padding(vertical = 10.dp))
-        }
-    }
-}
-
-@Composable
-private fun ReviewSevenDayHero(summary: ReviewPeriodSummary) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(SurfaceRaised)
-            .padding(horizontal = 18.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("Last 7 days", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (summary.detours > 0) {
-            Text("${summary.returned} / ${summary.detours}", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.onSurface)
-            Text("detours ended with a return to your intention", style = MaterialTheme.typography.titleMedium)
-        } else {
-            Text("No detours interrupted in the last 7 days.", style = MaterialTheme.typography.titleMedium)
-        }
-        ReviewMetaLine("${summary.intentionalSessions} sessions · ${summary.driftEpisodes} Drift ${pluralize(summary.driftEpisodes, "episode")}")
-        if (summary.detours > 0) {
-            ReviewMetaLine("${summary.returned} returned · ${summary.continued} continued · ${summary.ended} ended")
-        }
-    }
-}
-
-@Composable
-private fun ReviewRhythm(days: List<ReviewDaySummary>) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-        days.forEach { day ->
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(day.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                val dotColor = MaterialTheme.colorScheme.primary.copy(alpha = if (day.detours > 0) 1f else 0.3f)
-                Canvas(Modifier.size(20.dp)) { drawCircle(dotColor, if (day.detours > 0) 5.dp.toPx() else 3.dp.toPx(), center) }
-                Text(day.detours.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ReviewTrendRow(trend: ReviewTrend, modifier: Modifier = Modifier) {
-    val iconKind = when (trend.type) {
-        ReviewTrendType.DRIFT_FREQUENCY -> TaskTunnelIconKind.DRIFT
-        else -> TaskTunnelIconKind.ATTENTION
-    }
-    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-        ReviewMarkerTile {
-            TaskTunnelIcon(iconKind, Modifier.size(if (iconKind == TaskTunnelIconKind.DRIFT) 26.dp else 20.dp), MaterialTheme.colorScheme.primary)
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(trend.headline, style = MaterialTheme.typography.titleMedium)
-            Text(trend.supportingText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun ReviewTodayHero(recap: DailyAttentionRecap) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(SurfaceRaised)
-            .padding(horizontal = 18.dp, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("Today", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (recap.detoursInterrupted > 0) {
-            Text("${recap.recoveredIntentions} / ${recap.detoursInterrupted}", style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.onSurface)
-            Text("detours ended with a return to your intention", style = MaterialTheme.typography.titleMedium)
-        } else {
-            Text(recap.intentionalSessions.toString(), style = MaterialTheme.typography.headlineLarge, color = MaterialTheme.colorScheme.onSurface)
-            Text("intentional ${pluralize(recap.intentionalSessions, "session")} today", style = MaterialTheme.typography.titleMedium)
-            ReviewMetaLine("No detours interrupted today.")
-        }
-        ReviewMetaLine("${recap.intentionalSessions} sessions · ${recap.driftEpisodes} Drift ${pluralize(recap.driftEpisodes, "episode")}")
-        if (recap.detoursInterrupted > 0) {
-            ReviewMetaLine("${recap.recoveredIntentions} returned · ${recap.consciousDetours} continued · ${recap.endedTunnels} ended")
-        }
-    }
-}
-
-@Composable
-private fun PatternRow(pattern: AttentionPattern, modifier: Modifier = Modifier) {
-    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-        PatternMarker(pattern)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            PatternContextChip(patternContextLabel(pattern))
-            Text(patternHeadline(pattern), style = MaterialTheme.typography.titleMedium)
-            Text(patternSupportingText(pattern), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun PatternMarker(pattern: AttentionPattern) {
-    ReviewMarkerTile {
-        if (pattern.app != null && pattern.type in setOf(AttentionPatternType.COMMON_DETOUR_SURFACE, AttentionPatternType.RECOVERY_AFTER_SURFACE)) {
-            AppIcon(pattern.app.packageName, pattern.app.displayName, Modifier.size(28.dp))
-        } else {
-            val iconKind = when (pattern.type) {
-                AttentionPatternType.RECURRING_DRIFT_PATH,
-                AttentionPatternType.TIME_OF_DAY_DRIFT -> TaskTunnelIconKind.DRIFT
-                else -> TaskTunnelIconKind.ATTENTION
-            }
-            TaskTunnelIcon(iconKind, Modifier.size(if (iconKind == TaskTunnelIconKind.DRIFT) 30.dp else 22.dp), MaterialTheme.colorScheme.primary)
-        }
-    }
-}
-
-@Composable
-private fun ReviewMarkerTile(content: @Composable () -> Unit) {
+private fun ReviewInsightMarker(insight: ReviewInsight) {
     Box(
         modifier = Modifier
-            .size(52.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .size(48.dp)
+            .clip(RoundedCornerShape(15.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
     ) {
-        content()
-    }
-}
-
-@Composable
-private fun PatternContextChip(label: String) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f))
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun ReviewMetaLine(text: String) {
-    Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-}
-
-@Composable
-private fun patternContextLabel(pattern: AttentionPattern): String {
-    val context = LocalContext.current
-    return when (pattern.type) {
-        AttentionPatternType.COMMON_DETOUR_SURFACE -> listOfNotNull(pattern.app?.displayName, surfaceLabel(pattern.surface)).joinToString(" · ")
-        AttentionPatternType.RECOVERY_AFTER_SURFACE -> "Recovery · ${surfaceLabel(pattern.surface)}"
-        AttentionPatternType.RECURRING_DRIFT_PATH -> pattern.packageSequence
-            .joinToString(" → ") { DriftAppCatalog.labelFor(context, it) }
-            .ifBlank { "Recurring Drift" }
-        AttentionPatternType.TIME_OF_DAY_DRIFT -> "Drift · ${pattern.timeBucket?.label?.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() } ?: "Timing"}"
-    }
-}
-
-private fun pluralize(count: Int, singular: String): String = if (count == 1) singular else "${singular}s"
-
-private fun androidx.compose.foundation.lazy.LazyListScope.episodeItems(
-    episodes: List<AttentionEpisode>,
-    openEpisode: (AttentionEpisode) -> Unit,
-) {
-    items(episodes, key = { it.id }) { episode ->
-        if (episode.type == AttentionEpisodeType.DRIFT) DriftEpisodeRow(episode, { openEpisode(episode) })
-        else EpisodeRow(episode, { openEpisode(episode) })
-        Spacer(Modifier.height(4.dp))
-    }
-}
-
-@Composable
-private fun ActiveTunnelNotice(packageName: String, appName: String, task: String) {
-    Row(
-        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.medium).padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppIcon(packageName, appName, Modifier.size(34.dp))
-        Spacer(Modifier.width(TaskTunnelTokens.IconTextGap))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("Active Tunnel", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-            Text("$appName · $task", style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+        if (insight.type == ReviewInsightType.DETOUR && insight.app != null) {
+            AppIcon(insight.app.packageName, insight.app.displayName, Modifier.size(28.dp))
+        } else {
+            TaskTunnelIcon(
+                TaskTunnelIconKind.DRIFT,
+                Modifier.size(30.dp),
+                MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }
+
+@Composable
+private fun ReviewNoPatternCard() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised)
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("Nothing stands out yet", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Keep using Task Tunnel normally. Patterns will appear when behavior repeats enough to be genuinely useful.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun WeeklySummaryDisclosure(summary: ReviewPeriodSummary) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised)
+            .clickable { expanded = !expanded }
+            .padding(horizontal = 18.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("Last 7 days", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    weeklySummaryLead(summary),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                if (expanded) "Hide" else "Details",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+
+        if (expanded) {
+            RowDivider()
+            Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                WeeklyCountRow("Intentional sessions", summary.intentionalSessions)
+                WeeklyCountRow("Detours", summary.detours)
+                if (summary.detours > 0) {
+                    WeeklyCountRow("Returned", summary.returned)
+                    WeeklyCountRow("Continued", summary.continued)
+                    WeeklyCountRow("Ended", summary.ended)
+                }
+                WeeklyCountRow("Drift check-ins", summary.driftEpisodes)
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeeklyCountRow(label: String, count: Int) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        Text(count.toString(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+    }
+}
+
+private fun weeklySummaryLead(summary: ReviewPeriodSummary): String = when {
+    summary.intentionalSessions > 0 -> "${summary.intentionalSessions} intentional ${pluralize(summary.intentionalSessions, "session")}"
+    summary.driftEpisodes > 0 -> "${summary.driftEpisodes} Drift ${pluralize(summary.driftEpisodes, "check-in")}"
+    else -> "Recent activity"
+}
+
+private fun pluralize(count: Int, singular: String): String = if (count == 1) singular else "${singular}s"
 
 @Composable
 fun EpisodeDetailScreen(episode: AttentionEpisode?, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     LazyColumn(
         modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 14.dp),
+        contentPadding = PaddingValues(
+            horizontal = TaskTunnelTokens.ScreenHorizontalPadding,
+            vertical = 14.dp,
+        ),
     ) {
         if (episode == null) {
             item { EmptyState("Episode unavailable", "This episode is no longer in recent history.") }
         } else {
             item {
-                val subtitle = if (episode.type == AttentionEpisodeType.DRIFT && episode.involvedPackages.isNotEmpty()) {
-                    episode.involvedPackages.joinToString(" → ") { packageName ->
-                        DriftAppCatalog.labelFor(context, packageName)
-                    }
-                } else {
-                    episodeSubtitle(episode)
-                }
-                Text(formatEpisodeRange(episode), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(episodeTitle(episode), style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(top = 6.dp).semantics { heading() })
-                Text(subtitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
-                if (episode.type == AttentionEpisodeType.DRIFT && episode.involvedPackages.isNotEmpty()) {
-                    Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        episode.involvedPackages.take(3).forEach { packageName ->
-                            AppIdentity(
-                                packageName = packageName,
-                                displayName = DriftAppCatalog.labelFor(context, packageName),
-                                showName = false,
-                                iconSize = 30.dp,
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(20.dp))
+                EpisodeDetailHeader(episode)
+                Spacer(Modifier.height(28.dp))
+                SectionHeader("What happened", Modifier.padding(bottom = 10.dp))
             }
-            item { EpisodePath(episode.events) }
             item {
-                Text("This history stays on this device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 24.dp, bottom = 20.dp))
+                EpisodeStoryCard(episodeStory(episode))
+                Spacer(Modifier.height(24.dp))
             }
         }
     }
 }
 
 @Composable
-fun EpisodePath(events: List<AttentionEvent>, modifier: Modifier = Modifier) {
-    Column(modifier.fillMaxWidth()) {
-        events.forEachIndexed { index, event ->
-            val previousTimestamp = events.getOrNull(index - 1)?.let { formatTime(it.timestampMillis) }
-            EpisodePathNode(event, formatTime(event.timestampMillis) != previousTimestamp, index == 0, index == events.lastIndex)
-        }
-    }
-}
-
-@Composable
-private fun EpisodePathNode(event: AttentionEvent, showTimestamp: Boolean, first: Boolean, last: Boolean) {
+private fun EpisodeDetailHeader(episode: AttentionEpisode) {
     val context = LocalContext.current
-    val lineColor = MaterialTheme.colorScheme.outline
-    val nodeColor = when (event.type) {
-        AttentionEventType.INTENT -> MaterialTheme.colorScheme.primary
-        AttentionEventType.TRANSITION -> MaterialTheme.colorScheme.onSurfaceVariant
-        AttentionEventType.INTERVENTION -> LimitedAmber
-        AttentionEventType.DECISION -> HealthyGreen
-    }
-    val canvasColor = MaterialTheme.colorScheme.background
-    Row(Modifier.fillMaxWidth().heightIn(min = 42.dp)) {
-        Column(Modifier.width(64.dp).padding(top = 2.dp), horizontalAlignment = Alignment.End) {
-            if (showTimestamp) Text(formatTime(event.timestampMillis), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Box(Modifier.width(30.dp).fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-            Canvas(Modifier.fillMaxSize()) {
-                val x = size.width / 2f
-                if (!first) drawLine(lineColor, Offset(x, 0f), Offset(x, 12.dp.toPx()), 1.dp.toPx())
-                if (!last) drawLine(lineColor, Offset(x, 24.dp.toPx()), Offset(x, size.height), 1.dp.toPx())
-                drawCircle(nodeColor, 5.dp.toPx(), Offset(x, 18.dp.toPx()))
-                drawCircle(canvasColor, 2.dp.toPx(), Offset(x, 18.dp.toPx()))
-            }
-        }
-        Column(Modifier.weight(1f).padding(top = 1.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(event.type.timelineLabel(), style = MaterialTheme.typography.labelSmall, color = nodeColor)
-            val description = if (event.subtype == com.example.tasktunnel.attention.AttentionSubtype.DRIFT_SEQUENCE && event.relatedPackages.isNotEmpty()) {
-                event.relatedPackages.joinToString(" → ") { packageName ->
-                    DriftAppCatalog.labelFor(context, packageName)
+    when (episode.type) {
+        AttentionEpisodeType.TASK_TUNNEL -> {
+            val app = episode.app
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (app != null) {
+                    AppIcon(app.packageName, app.displayName, Modifier.size(46.dp))
+                    Spacer(Modifier.width(14.dp))
                 }
-            } else {
-                eventDescription(event)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        app?.displayName ?: "Task Tunnel",
+                        style = MaterialTheme.typography.headlineSmall,
+                        modifier = Modifier.semantics { heading() },
+                    )
+                    Text(
+                        taskLabel(episode.task),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
-            Text(description, style = MaterialTheme.typography.bodyLarge)
-            if (event.relatedApps.isNotEmpty() && event.relatedPackages.isEmpty() && event.app == null) {
-                Text(event.relatedApps.joinToString(" → ") { it.displayName }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "${formatEpisodeRange(episode)} · ${formatEpisodeDuration(episode)}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+        }
+        AttentionEpisodeType.DRIFT -> {
+            val appPath = episode.involvedPackages
+                .joinToString(" → ") { packageName -> DriftAppCatalog.labelFor(context, packageName) }
+                .ifBlank { episode.involvedApps.joinToString(" → ") { it.displayName } }
+            Text(
+                "Drift check-in",
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.semantics { heading() },
+            )
+            Text(
+                appPath,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            if (episode.involvedPackages.isNotEmpty()) {
+                Row(
+                    Modifier.padding(top = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    episode.involvedPackages.take(3).forEach { packageName ->
+                        AppIdentity(
+                            packageName = packageName,
+                            displayName = DriftAppCatalog.labelFor(context, packageName),
+                            showName = false,
+                            iconSize = 30.dp,
+                        )
+                    }
+                }
             }
+            Text(
+                formatEpisodeRange(episode),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 12.dp),
+            )
         }
     }
 }
 
-private fun AttentionEventType.timelineLabel(): String = when (this) {
-    AttentionEventType.INTENT -> "INTENT"
-    AttentionEventType.TRANSITION -> "TRANSITION"
-    AttentionEventType.INTERVENTION -> "INTERVENTION"
-    AttentionEventType.DECISION -> "DECISION"
+@Composable
+private fun EpisodeStoryCard(items: List<AttentionStoryItem>) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised),
+    ) {
+        if (items.isEmpty()) {
+            Text(
+                "No interruptions were recorded.",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(16.dp),
+            )
+            return@Column
+        }
+        items.forEachIndexed { index, item ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text(
+                    item.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(14.dp))
+                Text(
+                    formatTime(item.timestampMillis),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            if (index < items.lastIndex) {
+                RowDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            }
+        }
+    }
 }
 
 @Composable
 fun ProtectionScreen(
     snapshot: ProtectionSnapshot,
     protectionEnabled: Boolean,
+    setupChecklist: SetupChecklistState,
+    openSupportedApp: (String) -> Unit,
     setProtectionEnabled: (Boolean) -> Unit,
     selectedDriftPackages: Set<String>,
     availableDriftApps: List<KnownDriftApp>,
@@ -573,6 +613,7 @@ fun ProtectionScreen(
             end = TaskTunnelTokens.ScreenHorizontalPadding,
             bottom = 32.dp,
         ),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item {
             MasterProtectionCard(
@@ -580,54 +621,42 @@ fun ProtectionScreen(
                 accessibilityEnabled = snapshot.diagnosticReport.accessibilityEnabled,
                 setEnabled = setProtectionEnabled,
             )
-            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-            if (protectionEnabled) {
-                ProtectionStatusLine(snapshot.health, Modifier.fillMaxWidth(), showSummary = true)
-                if (snapshot.health.level != ProtectionLevel.ACTIVE) {
-                    Button(
-                        onClick = repairAccessibility,
-                        modifier = Modifier.padding(top = 14.dp).height(48.dp),
-                        shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
-                    ) { Text("Turn protection on") }
-                    if (snapshot.health.backgroundConcern) {
-                        Text(
-                            "If access is already on, turn Task Tunnel off and on in Accessibility settings. Check background restrictions only if interruptions continue.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 10.dp),
-                        )
-                    }
-                }
-                Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-            }
-            SectionHeader("Protected apps", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
         }
-        snapshot.apps.take(3).forEachIndexed { index, app ->
+        if (!setupChecklist.complete) {
             item {
-                ProtectedAppRow(app, supportedIntentions(app.packageName))
-                if (index < 2) RowDivider(inset = true)
+                SetupChecklistCard(
+                    state = setupChecklist,
+                    protectionEnabled = protectionEnabled,
+                    supportedApps = snapshot.apps.take(3),
+                    enableAccessibility = repairAccessibility,
+                    openSupportedApp = openSupportedApp,
+                )
+            }
+        }
+        if (protectionEnabled && snapshot.health.level != ProtectionLevel.ACTIVE) {
+            item {
+                ProtectionNeedsAttentionCard(
+                    health = snapshot.health,
+                    repairAccessibility = repairAccessibility,
+                    openTroubleshooting = openDiagnostics,
+                )
             }
         }
         item {
-            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-            SectionHeader("Intentional check-ins", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = TaskTunnelTokens.RowVerticalPadding),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
-                    Text("Ask again after a while", style = MaterialTheme.typography.titleMedium)
-                    Text("Ask again when a detour or open-ended browse has been running for a while.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Spacer(Modifier.width(8.dp))
-                Switch(
-                    checked = intentionalCheckInsEnabled,
-                    onCheckedChange = setIntentionalCheckInsEnabled,
-                    enabled = protectionEnabled,
-                )
-            }
-            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-            SectionHeader("Drift Detection", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            Spacer(Modifier.height(4.dp))
+            SectionHeader("Works with", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            SupportedAppsCard(snapshot.apps.take(3))
+        }
+        item {
+            FeatureToggleCard(
+                title = "Check-ins",
+                description = "Ask again during longer sessions so an intentional browse doesn't quietly turn into autopilot.",
+                checked = intentionalCheckInsEnabled,
+                enabled = protectionEnabled,
+                onCheckedChange = setIntentionalCheckInsEnabled,
+            )
+        }
+        item {
             DriftConfigurationSection(
                 selectedPackages = selectedDriftPackages,
                 availableApps = availableDriftApps,
@@ -635,36 +664,190 @@ fun ProtectionScreen(
                 setDriftEnabled = setDriftEnabled,
                 setAppEnabled = setDriftAppEnabled,
             )
-            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-            SectionHeader("System", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
-            SettingsRow(
-                title = "Protection health",
-                subtitle = if (protectionEnabled) {
-                    snapshot.health.summary
-                } else {
-                    "Task Tunnel services are paused. Accessibility access is unchanged."
-                },
-                trailingText = if (!protectionEnabled) {
-                    "Paused"
-                } else {
-                    when (snapshot.health.level) {
-                        ProtectionLevel.ACTIVE -> "Good"
-                        ProtectionLevel.LIMITED -> "Limited"
-                        ProtectionLevel.OFF -> "Off"
-                    }
-                },
-                showChevron = true,
-                onClick = openDiagnostics,
+        }
+    }
+}
+
+@Composable
+private fun ProtectionNeedsAttentionCard(
+    health: ProtectionHealth,
+    repairAccessibility: () -> Unit,
+    openTroubleshooting: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(LimitedAmber.copy(alpha = 0.10f))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("Task Tunnel needs a quick fix", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Task Tunnel may miss moments when you drift until Android access is restored.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = repairAccessibility,
+                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+            ) { Text("Fix now") }
+            TextButton(onClick = openTroubleshooting) { Text("Troubleshoot") }
+        }
+        if (health.backgroundConcern) {
+            Text(
+                "If this keeps happening after access is on, Troubleshooting has the Android-specific checks.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            RowDivider()
-            SettingsRow(
-                title = "Accessibility access",
-                subtitle = if (snapshot.diagnosticReport.accessibilityEnabled) "Task Tunnel can inspect supported app surfaces." else "Required for interventions in supported apps.",
-                trailingText = if (snapshot.diagnosticReport.accessibilityEnabled) "On" else "Off",
-                showChevron = !snapshot.diagnosticReport.accessibilityEnabled,
-                onClick = if (snapshot.diagnosticReport.accessibilityEnabled) openDiagnostics else repairAccessibility,
+        }
+    }
+}
+
+@Composable
+private fun FeatureToggleCard(
+    title: String,
+    description: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised)
+            .alpha(if (enabled) 1f else 0.5f)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+    }
+}
+
+@Composable
+private fun SupportedAppsCard(apps: List<InstalledAppStatus>) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised)
+            .padding(horizontal = 10.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        apps.forEach { app ->
+            val status = when (app.compatibility) {
+                AppCompatibility.NOT_INSTALLED -> "Not installed"
+                AppCompatibility.KNOWN_COMPATIBILITY_PROBLEM -> "Needs attention"
+                AppCompatibility.VERIFIED, AppCompatibility.VERSION_NOT_RECORDED -> "Ready"
+            }
+            val statusColor = when (app.compatibility) {
+                AppCompatibility.NOT_INSTALLED -> MaterialTheme.colorScheme.onSurfaceVariant
+                AppCompatibility.KNOWN_COMPATIBILITY_PROBLEM -> LimitedAmber
+                AppCompatibility.VERIFIED, AppCompatibility.VERSION_NOT_RECORDED -> HealthyGreen
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AppIcon(app.packageName, app.displayName, Modifier.size(40.dp))
+                Text(app.displayName, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(status, style = MaterialTheme.typography.bodySmall, color = statusColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SetupChecklistCard(
+    state: SetupChecklistState,
+    protectionEnabled: Boolean,
+    supportedApps: List<InstalledAppStatus>,
+    enableAccessibility: () -> Unit,
+    openSupportedApp: (String) -> Unit,
+) {
+    val firstInstalledApp = supportedApps.firstOrNull { it.versionName != null }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Finish setting up", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Task Tunnel can stay out of your way once these basics are done.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(24.dp))
+        }
+        SetupChecklistRow(
+            complete = state.supportedAppInstalled,
+            title = "Supported app available",
+            detail = if (state.supportedAppInstalled) {
+                "Instagram, YouTube, or TikTok is ready to use."
+            } else {
+                "Install Instagram, YouTube, or TikTok to use Task Tunnel intentions."
+            },
+        )
+        SetupChecklistRow(
+            complete = state.accessibilityEnabled,
+            title = "Android permission ready",
+            detail = if (state.accessibilityEnabled) {
+                "Task Tunnel can step in when you move away from your intention."
+            } else {
+                "Turn this on so Purpose Gate and gentle reminders can appear."
+            },
+        )
+        SetupChecklistRow(
+            complete = state.firstTunnelStarted,
+            title = "Try your first intention",
+            detail = if (state.firstTunnelStarted) {
+                "Your first Task Tunnel has started successfully."
+            } else {
+                "Open a supported app and choose what you came to do."
+            },
+        )
+        when {
+            !protectionEnabled -> Text(
+                "Turn on Task Tunnel above before trying an intention.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            !state.accessibilityEnabled -> Button(
+                onClick = enableAccessibility,
+                modifier = Modifier.fillMaxWidth().height(46.dp),
+                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+            ) { Text("Enable permission") }
+            !state.firstTunnelStarted && firstInstalledApp != null -> Button(
+                onClick = { openSupportedApp(firstInstalledApp.packageName) },
+                modifier = Modifier.fillMaxWidth().height(46.dp),
+                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+            ) { Text("Try Task Tunnel") }
+        }
+    }
+}
+
+@Composable
+private fun SetupChecklistRow(complete: Boolean, title: String, detail: String) {
+    val markerColor = if (complete) HealthyGreen else MaterialTheme.colorScheme.outlineVariant
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Canvas(Modifier.padding(top = 5.dp).size(10.dp)) {
+            drawCircle(markerColor)
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -675,86 +858,92 @@ private fun MasterProtectionCard(
     accessibilityEnabled: Boolean,
     setEnabled: (Boolean) -> Unit,
 ) {
-    val statusColor = if (enabled) MaterialTheme.colorScheme.primary else LimitedAmber
-    val statusBackground = if (enabled) BrandBlueContainer else LimitedAmber.copy(alpha = 0.14f)
-    Column(
+    val statusColor = when {
+        !enabled -> LimitedAmber
+        !accessibilityEnabled -> LimitedAmber
+        else -> HealthyGreen
+    }
+    val statusText = when {
+        !enabled -> "Paused"
+        !accessibilityEnabled -> "Needs setup"
+        else -> "Active"
+    }
+    val motifColor = MaterialTheme.colorScheme.primary
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
             .background(SurfaceRaised)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Task Tunnel services",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f),
-            )
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(statusBackground)
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-            ) {
-                Text(
-                    if (enabled) "On" else "Paused",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = statusColor,
+            .drawBehind {
+                val stroke = 1.5.dp.toPx()
+                drawLine(
+                    color = motifColor.copy(alpha = 0.10f),
+                    start = Offset(size.width * 0.03f, size.height * 0.12f),
+                    end = Offset(size.width * 0.47f, size.height * 0.94f),
+                    strokeWidth = stroke,
                 )
+                drawLine(
+                    color = motifColor.copy(alpha = 0.10f),
+                    start = Offset(size.width * 0.97f, size.height * 0.12f),
+                    end = Offset(size.width * 0.53f, size.height * 0.94f),
+                    strokeWidth = stroke,
+                )
+                drawCircle(
+                    color = motifColor.copy(alpha = 0.14f),
+                    radius = 3.dp.toPx(),
+                    center = Offset(size.width * 0.5f, size.height * 0.91f),
+                )
+            },
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        if (enabled) "Task Tunnel is active" else "Task Tunnel is paused",
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                    Text(
+                        when {
+                            !enabled -> "Your settings are saved. Turn it back on whenever you want help staying intentional."
+                            !accessibilityEnabled -> "One Android permission needs attention before Task Tunnel can step in."
+                            else -> "It’ll ask why you opened a supported app and step in if you wander away."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(statusColor.copy(alpha = 0.13f))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                ) {
+                    Text(statusText, style = MaterialTheme.typography.labelMedium, color = statusColor)
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                if (enabled) {
+                    Button(
+                        onClick = { setEnabled(false) },
+                        shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = BrandBlueContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                    ) { Text("Turn off") }
+                } else {
+                    Button(
+                        onClick = { setEnabled(true) },
+                        shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+                    ) { Text("Turn on") }
+                }
             }
         }
-        Text(
-            when {
-                !enabled -> "Protection is paused. Your settings are saved."
-                !accessibilityEnabled -> "Ready, but Accessibility access is off."
-                else -> "Protection is running with your saved settings."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (enabled) {
-            Button(
-                onClick = { setEnabled(false) },
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = BrandBlueContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                ),
-            ) { Text("Turn off") }
-        } else {
-            Button(
-                onClick = { setEnabled(true) },
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
-            ) { Text("Turn on") }
-        }
     }
-}
-
-@Composable
-private fun ProtectedAppRow(app: InstalledAppStatus, intentions: String) {
-    val status = when (app.compatibility) {
-        AppCompatibility.NOT_INSTALLED -> "Not installed"
-        AppCompatibility.KNOWN_COMPATIBILITY_PROBLEM -> "Check health"
-        AppCompatibility.VERIFIED -> "Verified"
-        AppCompatibility.VERSION_NOT_RECORDED -> null
-    }
-    SettingsRow(
-        title = app.displayName,
-        subtitle = intentions,
-        leading = { AppIcon(app.packageName, app.displayName, Modifier.size(TaskTunnelTokens.AppIconSize)) },
-        trailingText = status,
-        subtitleMaxLines = intentions.lineSequence().count().coerceAtLeast(2),
-    )
-}
-
-private fun supportedIntentions(packageName: String): String = when (packageName) {
-    "com.instagram.android" -> "Reply to messages\nSearch / look something up\nPost something\nBrowse intentionally"
-    "com.zhiliaoapp.musically" -> "Search / watch something specific\nCheck Inbox\nBrowse intentionally"
-    "com.google.android.youtube" -> "Search / watch something specific\nCheck subscriptions\nWatch Shorts intentionally\nBrowse intentionally"
-    else -> "Intentional use"
 }
 
 @Composable
@@ -780,42 +969,55 @@ fun DriftConfigurationSection(
         )
     }
 
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = TaskTunnelTokens.RowVerticalPadding),
-        verticalAlignment = Alignment.CenterVertically,
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(SurfaceRaised)
+            .alpha(if (controlsEnabled) 1f else 0.5f)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
-            Text("Notice rapid app switching", style = MaterialTheme.typography.titleMedium)
-            Text("Optional. Checks for quick movement between selected apps.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Drift", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Catch yourself bouncing quickly between apps without meaning to.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = { requested ->
+                    if (requested && !setDriftEnabled(true)) {
+                        showAppPicker = true
+                    } else if (!requested) {
+                        setDriftEnabled(false)
+                    }
+                },
+                enabled = controlsEnabled,
+            )
         }
-        Spacer(Modifier.width(8.dp))
-        Switch(
-            checked = enabled,
-            onCheckedChange = { requested ->
-                if (requested && !setDriftEnabled(true)) {
-                    showAppPicker = true
-                } else if (!requested) {
-                    setDriftEnabled(false)
-                }
-            },
-            enabled = controlsEnabled,
-        )
-    }
-    if (enabled) {
-        val visibleSummary = when {
-            selectedApps.isEmpty() && hiddenSelectionCount > 0 -> "$hiddenSelectionCount unavailable ${pluralize(hiddenSelectionCount, "app")} selected"
-            selectedApps.isEmpty() -> "Choose which apps count toward Drift"
-            selectedApps.size <= 3 && hiddenSelectionCount == 0 -> selectedApps.joinToString(", ") { it.displayName }
-            else -> "${selectedApps.size + hiddenSelectionCount} ${pluralize(selectedApps.size + hiddenSelectionCount, "app")} selected"
+        if (enabled) {
+            val count = selectedApps.size + hiddenSelectionCount
+            val visibleSummary = when {
+                selectedApps.isEmpty() && hiddenSelectionCount > 0 -> "$hiddenSelectionCount unavailable ${pluralize(hiddenSelectionCount, "app")} selected"
+                selectedApps.isEmpty() -> "Choose which apps can form a Drift path"
+                selectedApps.size <= 3 && hiddenSelectionCount == 0 -> selectedApps.joinToString(" · ") { it.displayName }
+                else -> "$count ${pluralize(count, "app")} included"
+            }
+            RowDivider()
+            SettingsRow(
+                title = "Apps included",
+                subtitle = visibleSummary,
+                trailingText = count.toString(),
+                showChevron = controlsEnabled,
+                enabled = controlsEnabled,
+                onClick = if (controlsEnabled) ({ showAppPicker = true }) else null,
+            )
         }
-        SettingsRow(
-            title = "Apps included",
-            subtitle = visibleSummary,
-            trailingText = (selectedApps.size + hiddenSelectionCount).toString(),
-            showChevron = controlsEnabled,
-            enabled = controlsEnabled,
-            onClick = if (controlsEnabled) ({ showAppPicker = true }) else null,
-        )
     }
 }
 
@@ -839,11 +1041,11 @@ private fun DriftAppPickerDialog(
 
     AlertDialog(
         onDismissRequest = dismiss,
-        title = { Text("Apps in Drift Detection") },
+        title = { Text("Apps included in Drift") },
         text = {
             Column {
                 Text(
-                    "Choose any installed app whose rapid switching should count toward Drift.",
+                    "Choose the apps that can be part of a Drift path.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -852,7 +1054,8 @@ private fun DriftAppPickerDialog(
                     onValueChange = { query = it },
                     modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
                     singleLine = true,
-                    label = { Text("Search apps") },
+                    placeholder = { Text("Search apps") },
+                    shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
                 )
                 if (filteredApps.isEmpty()) {
                     Text(
@@ -866,9 +1069,11 @@ private fun DriftAppPickerDialog(
                         items(filteredApps, key = { it.packageName }) { app ->
                             val selected = app.packageName in selectedPackages
                             Row(
-                                Modifier.fillMaxWidth()
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 52.dp)
                                     .clickable { setAppEnabled(app.packageName, !selected) }
-                                    .padding(vertical = 8.dp),
+                                    .padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 AppIcon(app.packageName, app.displayName, Modifier.size(34.dp))
@@ -898,43 +1103,73 @@ private fun DriftAppPickerDialog(
 fun OnboardingScreen(
     progress: OnboardingProgress,
     accessibilityEnabled: Boolean,
+    supportedApps: List<InstalledAppStatus>,
+    firstTunnelStarted: Boolean,
     selectedDriftPackages: Set<String>,
     availableDriftApps: List<KnownDriftApp>,
     setDriftEnabled: (Boolean) -> Boolean,
     setDriftAppEnabled: (String, Boolean) -> Unit,
     advance: () -> Unit,
     openAccessibilitySettings: () -> Unit,
+    openSupportedApp: (String) -> Unit,
     completeLater: () -> Unit,
 ) {
-    val stepNumber = progress.step.ordinal + 1
+    val installedSupportedApps = supportedApps.filter { it.versionName != null }
+    val stepLabel = if (progress.step == OnboardingStep.READY) "Ready" else "${progress.step.ordinal + 1} of 5"
+    val primaryLabel = when (progress.step) {
+        OnboardingStep.VALUE -> "Get started"
+        OnboardingStep.APPS -> "Continue"
+        OnboardingStep.ACCESSIBILITY -> if (accessibilityEnabled) "Continue" else "Enable permission"
+        OnboardingStep.DRIFT -> "Continue"
+        OnboardingStep.TRY -> null
+        OnboardingStep.READY -> "Start using Task Tunnel"
+    }
+    val primaryAction: (() -> Unit)? = when (progress.step) {
+        OnboardingStep.ACCESSIBILITY -> if (accessibilityEnabled) advance else openAccessibilitySettings
+        OnboardingStep.TRY -> null
+        else -> advance
+    }
+    val secondaryLabel = when (progress.step) {
+        OnboardingStep.VALUE,
+        OnboardingStep.APPS,
+        -> "Set up later"
+        OnboardingStep.ACCESSIBILITY -> if (accessibilityEnabled) null else "Set up later"
+        OnboardingStep.DRIFT -> if (selectedDriftPackages.isEmpty()) "Skip for now" else null
+        OnboardingStep.TRY -> "Try later"
+        OnboardingStep.READY -> null
+    }
+    val secondaryAction: (() -> Unit)? = when (progress.step) {
+        OnboardingStep.DRIFT -> advance
+        OnboardingStep.VALUE,
+        OnboardingStep.APPS,
+        OnboardingStep.ACCESSIBILITY,
+        OnboardingStep.TRY,
+        -> completeLater
+        OnboardingStep.READY -> null
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            Column(
-                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).navigationBarsPadding()
-                    .padding(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Button(
-                    onClick = when (progress.step) {
-                        OnboardingStep.DISCLOSURE -> openAccessibilitySettings
-                        else -> advance
-                    },
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
+            if (primaryAction != null || secondaryAction != null) {
+                Column(
+                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).navigationBarsPadding()
+                        .padding(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(
-                        when (progress.step) {
-                            OnboardingStep.VALUE -> "See how it works"
-                            OnboardingStep.HOW_IT_WORKS -> "Privacy and Accessibility"
-                            OnboardingStep.DISCLOSURE -> "Continue to Accessibility settings"
-                            OnboardingStep.VERIFY -> if (accessibilityEnabled) "Choose protection setup" else "Continue without access"
-                            OnboardingStep.CONFIGURE -> "Finish setup"
-                        },
-                    )
-                }
-                if (progress.step != OnboardingStep.CONFIGURE) {
-                    TextButton(onClick = completeLater, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("Set up later") }
+                    if (primaryAction != null && primaryLabel != null) {
+                        Button(
+                            onClick = primaryAction,
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
+                            shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+                        ) { Text(primaryLabel) }
+                    }
+                    if (secondaryAction != null && secondaryLabel != null) {
+                        TextButton(onClick = secondaryAction, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                            Text(secondaryLabel)
+                        }
+                    }
                 }
             }
         },
@@ -944,20 +1179,31 @@ fun OnboardingScreen(
                 .verticalScroll(rememberScrollState()).padding(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 20.dp),
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("TASK TUNNEL", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                Text("$stepNumber of 5", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Task Tunnel", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(stepLabel, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Spacer(Modifier.height(38.dp))
+            Spacer(Modifier.height(32.dp))
             when (progress.step) {
                 OnboardingStep.VALUE -> ValueOnboarding()
-                OnboardingStep.HOW_IT_WORKS -> HowItWorksOnboarding()
-                OnboardingStep.DISCLOSURE -> DisclosureContent()
-                OnboardingStep.VERIFY -> VerifyOnboarding(accessibilityEnabled, openAccessibilitySettings)
-                OnboardingStep.CONFIGURE -> ConfigureOnboarding(
+                OnboardingStep.APPS -> SupportedAppsOnboarding(supportedApps)
+                OnboardingStep.ACCESSIBILITY -> AccessibilityOnboarding(accessibilityEnabled)
+                OnboardingStep.DRIFT -> DriftOnboarding(
                     selected = selectedDriftPackages,
                     availableApps = availableDriftApps,
                     setEnabled = setDriftEnabled,
                     setApp = setDriftAppEnabled,
+                )
+                OnboardingStep.TRY -> TryOnboarding(
+                    accessibilityEnabled = accessibilityEnabled,
+                    installedApps = installedSupportedApps,
+                    firstTunnelStarted = firstTunnelStarted,
+                    openAccessibilitySettings = openAccessibilitySettings,
+                    openSupportedApp = openSupportedApp,
+                )
+                OnboardingStep.READY -> ReadyOnboarding(
+                    accessibilityEnabled = accessibilityEnabled,
+                    supportedAppInstalled = installedSupportedApps.isNotEmpty(),
+                    firstTunnelStarted = firstTunnelStarted,
                 )
             }
             Spacer(Modifier.height(24.dp))
@@ -967,130 +1213,262 @@ fun OnboardingScreen(
 
 @Composable
 private fun ValueOnboarding() {
-    Text("Keep the reason you opened the app", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+    Text("Use distracting apps with a reason", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text(
-        "Use Instagram, YouTube, and TikTok for what you intended. Task Tunnel adds a calm pause when you move somewhere else.",
+        "Task Tunnel asks what you came to do, then stays quiet until your attention moves somewhere that no longer fits.",
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 14.dp),
     )
-    Spacer(Modifier.height(34.dp))
-    OnboardingPoint("01", "Choose a purpose", "Reply, search, watch, or browse intentionally.")
-    OnboardingPoint("02", "Stay in the native app", "Task Tunnel disappears while you stay with that purpose.")
-    OnboardingPoint("03", "Make the next choice", "Return, allow the detour, or end the Tunnel.")
+    Spacer(Modifier.height(30.dp))
+    OnboardingPoint("1", "Choose a purpose", "Reply, search, watch, post, or browse intentionally.")
+    OnboardingPoint("2", "Use the real app", "Nothing is replaced or locked behind a fake interface.")
+    OnboardingPoint("3", "Decide when you drift", "Return, continue consciously, or end the Tunnel.")
 }
 
 @Composable
-private fun HowItWorksOnboarding() {
-    Text("A quiet layer over apps you already use", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+private fun SupportedAppsOnboarding(apps: List<InstalledAppStatus>) {
+    Text("Built around the apps you already use", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text(
-        "Task Tunnel watches only supported app surfaces while protection is active. It does not replace Instagram, YouTube, or TikTok.",
+        "Task Tunnel currently understands intentions inside Instagram, YouTube, and TikTok. You don't need to configure each one separately.",
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 14.dp, bottom = 30.dp),
+        modifier = Modifier.padding(top = 14.dp, bottom = 22.dp),
     )
-    OnboardingPoint("01", "Choose a purpose", "Choose what you came to do.")
-    OnboardingPoint("02", "Use the native app", "Task Tunnel stays quiet while the purpose still fits.")
-    OnboardingPoint("03", "Choose what happens next", "If you leave that purpose, Task Tunnel offers a decision.")
-    Text("Uncertain screens always fail open. Intentional browsing is a first-class choice.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 18.dp))
-}
-
-@Composable
-private fun OnboardingPoint(index: String, title: String, body: String) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-            Text(
-                index,
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.width(42.dp).padding(top = 2.dp),
-            )
-            Text(
-                title,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f),
-            )
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(TaskTunnelTokens.CardRadius)).background(SurfaceRaised),
+    ) {
+        apps.forEachIndexed { index, app ->
+            SupportedAppSetupRow(app)
+            if (index < apps.lastIndex) RowDivider(modifier = Modifier.padding(horizontal = 16.dp))
         }
+    }
+    if (apps.none { it.versionName != null }) {
         Text(
-            body,
+            "Install at least one supported app before trying Task Tunnel. You can finish the rest of setup now.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 42.dp, top = 3.dp),
+            modifier = Modifier.padding(top = 14.dp),
         )
     }
 }
 
 @Composable
-private fun VerifyOnboarding(accessibilityEnabled: Boolean, openSettings: () -> Unit) {
-    Text(if (accessibilityEnabled) "Protection is ready" else "Accessibility access is still off", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
-    Text(
-        if (accessibilityEnabled) "Task Tunnel can now recognize supported surfaces on this device." else "You can continue using Task Tunnel and enable access later from Protection.",
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 14.dp),
-    )
-    if (!accessibilityEnabled) TextButton(onClick = openSettings, modifier = Modifier.padding(top = 14.dp)) { Text("Try Accessibility settings again") }
+private fun SupportedAppSetupRow(app: InstalledAppStatus) {
+    val installed = app.versionName != null
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppIcon(app.packageName, app.displayName, Modifier.size(36.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(app.displayName, style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (installed) "Ready for Task Tunnel" else "Not installed",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }
 
 @Composable
-private fun ConfigureOnboarding(
+private fun AccessibilityOnboarding(accessibilityEnabled: Boolean) {
+    Text("Let Task Tunnel notice where you are", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+    Text(
+        "Android Accessibility lets Task Tunnel tell when you move between places like Messages, Reels, Search or Shorts so it can step in at the right moment.",
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 14.dp, bottom = 24.dp),
+    )
+    SetupFact("Stays on your phone", "Screen recognition and Task Tunnel decisions run on this device.")
+    SetupFact("Private by design", "Task Tunnel does not store message contents, searches, titles, screenshots, or raw accessibility trees.")
+    SetupFact("When unsure, it stays out of the way", "If Task Tunnel can't confidently tell where you are, it leaves you alone.")
+    Spacer(Modifier.height(20.dp))
+    val statusColor = if (accessibilityEnabled) HealthyGreen else LimitedAmber
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Canvas(Modifier.size(9.dp)) { drawCircle(statusColor) }
+        Spacer(Modifier.width(9.dp))
+        Text(
+            if (accessibilityEnabled) "Permission is ready" else "Permission still needs to be enabled",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun SetupFact(title: String, detail: String) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun DriftOnboarding(
     selected: Set<String>,
     availableApps: List<KnownDriftApp>,
     setEnabled: (Boolean) -> Boolean,
     setApp: (String, Boolean) -> Unit,
 ) {
-    Text("Your protection setup", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
-    Text("Task Tunnel protects these intentions.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 10.dp, bottom = 24.dp))
-    SettingsRow(
-        "Instagram",
-        supportedIntentions("com.instagram.android"),
-        leading = { AppIcon("com.instagram.android", "Instagram", Modifier.size(38.dp)) },
-        subtitleMaxLines = 4,
+    Text("Catch app-hopping too", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+    Text(
+        "Drift is optional. It notices quick switching such as Reddit → Instagram → YouTube and gives you a moment to notice the pattern.",
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 14.dp, bottom = 22.dp),
     )
-    RowDivider(inset = true)
-    SettingsRow(
-        "YouTube",
-        supportedIntentions("com.google.android.youtube"),
-        leading = { AppIcon("com.google.android.youtube", "YouTube", Modifier.size(38.dp)) },
-        subtitleMaxLines = 4,
-    )
-    RowDivider(inset = true)
-    SettingsRow(
-        "TikTok",
-        supportedIntentions("com.zhiliaoapp.musically"),
-        leading = { AppIcon("com.zhiliaoapp.musically", "TikTok", Modifier.size(38.dp)) },
-        subtitleMaxLines = 3,
-    )
-    Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-    SectionHeader("Optional Drift Detection", Modifier.padding(bottom = 6.dp))
     DriftConfigurationSection(selected, availableApps, setEnabled, setApp)
+    Text(
+        "For apps used only in Drift, Task Tunnel only notices which app is in front. It does not read what is on that app's screen.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 12.dp),
+    )
+}
+
+@Composable
+private fun TryOnboarding(
+    accessibilityEnabled: Boolean,
+    installedApps: List<InstalledAppStatus>,
+    firstTunnelStarted: Boolean,
+    openAccessibilitySettings: () -> Unit,
+    openSupportedApp: (String) -> Unit,
+) {
+    Text("Try it once", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+    Text(
+        "Open a supported app, choose what you came to do when Purpose Gate appears, then come back here. That's the whole interaction.",
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 14.dp, bottom = 24.dp),
+    )
+    when {
+        firstTunnelStarted -> {
+            SetupFact("It worked", "Your first Task Tunnel started successfully.")
+        }
+        !accessibilityEnabled -> {
+            Text(
+                "The Android permission above needs to be on before Purpose Gate can appear.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = openAccessibilitySettings,
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp).height(50.dp),
+                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+            ) { Text("Enable permission") }
+        }
+        installedApps.isEmpty() -> {
+            Text(
+                "No supported app is installed yet. Install Instagram, YouTube, or TikTok, then return here to try it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        else -> {
+            installedApps.forEachIndexed { index, app ->
+                val content: @Composable () -> Unit = {
+                    AppIcon(app.packageName, app.displayName, Modifier.size(24.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("Open ${app.displayName}")
+                }
+                if (index == 0) {
+                    Button(
+                        onClick = { openSupportedApp(app.packageName) },
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
+                        shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+                        content = { content() },
+                    )
+                } else {
+                    OutlinedButton(
+                        onClick = { openSupportedApp(app.packageName) },
+                        modifier = Modifier.fillMaxWidth().padding(top = 10.dp).height(50.dp),
+                        shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+                        content = { content() },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReadyOnboarding(
+    accessibilityEnabled: Boolean,
+    supportedAppInstalled: Boolean,
+    firstTunnelStarted: Boolean,
+) {
+    Text("You're ready", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+    Text(
+        "Task Tunnel is set up. Open a supported app normally and Purpose Gate will appear when protection is active.",
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 14.dp, bottom = 26.dp),
+    )
+    OnboardingStatusRow(supportedAppInstalled, "Supported app ready")
+    OnboardingStatusRow(accessibilityEnabled, "Android permission ready")
+    OnboardingStatusRow(firstTunnelStarted, "First intention tried")
+}
+
+@Composable
+private fun OnboardingStatusRow(complete: Boolean, label: String) {
+    val color = if (complete) HealthyGreen else LimitedAmber
+    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Canvas(Modifier.size(10.dp)) { drawCircle(color) }
+        Spacer(Modifier.width(11.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
+private fun OnboardingPoint(index: String, title: String, body: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(index, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable
 fun DisclosureContent() {
-    Text("Why Accessibility access is needed", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+    Text("How Task Tunnel works on your phone", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
     Text(
-        "Task Tunnel uses Android Accessibility access for its digital-wellbeing protection feature.",
+        "Task Tunnel uses Android Accessibility so it can notice where you are inside supported apps and step in only when it needs to.",
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 10.dp, bottom = 18.dp),
     )
-    DisclosureItem("What it can see", "In supported apps, enough of the visible interface to identify surfaces such as Messages, Reels, Explore, Search, normal videos, Shorts, For You, Friends, Inbox, and Profile. For apps used only in Drift Detection, Task Tunnel uses the foreground app identity rather than reading that app's screen content.")
-    DisclosureItem("Why", "To tell when you move outside the purpose you declared and to notice rapid switching between the apps you selected for Drift Detection.")
-    DisclosureItem("What is stored", "Your chosen purposes, selected Drift apps, meaningful app transitions, Task Tunnel prompts, and the choices you make.")
-    DisclosureItem("What is not stored", "No screenshots, private message contents, accessibility text history, usernames in Attention history, raw accessibility trees, or raw fingerprints.")
-    DisclosureItem("Where processing happens", "Everything is processed on this device. No account or cloud connection is required.")
+    DisclosureItem("What it notices", "In Instagram, YouTube and TikTok, Task Tunnel recognizes broad places such as Messages, Reels, Search, videos, Shorts and Inbox. Apps used only for Drift contribute only which app is currently in front.")
+    DisclosureItem("Why", "This lets Task Tunnel notice when you move away from the purpose you chose, and when you rapidly hop between selected apps.")
+    DisclosureItem("What stays private", "Task Tunnel does not keep screenshots, message contents, searches, video titles, usernames, raw screen text, or raw accessibility trees.")
+    DisclosureItem("What is saved", "Your chosen purposes, Drift app choices, meaningful transitions, prompts and the choices you make are stored locally so Attention and Review can work.")
+    DisclosureItem("Where your data lives", "Protection and activity processing stay on this device. Feedback is sent only when you explicitly tap Send, and the form shows what will be included.")
 }
 
 @Composable
 private fun DisclosureItem(title: String, body: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.Top) {
-        TaskTunnelIcon(TaskTunnelIconKind.INFO, Modifier.padding(top = 2.dp).size(17.dp), MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(12.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -1102,17 +1480,25 @@ fun AccessibilityDisclosureScreen(accessEnabled: Boolean, continueToSettings: ()
     ) {
         item { DisclosureContent() }
         item {
-            Text(
-                if (accessEnabled) "Accessibility access is currently on." else "Accessibility access is currently off.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (accessEnabled) HealthyGreen else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 14.dp),
-            )
+            Row(
+                modifier = Modifier.padding(top = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Canvas(Modifier.size(8.dp)) {
+                    drawCircle(if (accessEnabled) HealthyGreen else LimitedAmber)
+                }
+                Text(
+                    if (accessEnabled) "Android permission is ready" else "Android permission is off",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Button(
                 onClick = continueToSettings,
                 modifier = Modifier.fillMaxWidth().padding(top = 14.dp).height(50.dp),
                 shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
-            ) { Text("Continue to Accessibility settings") }
+            ) { Text("Open Android settings") }
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -1127,15 +1513,17 @@ fun SettingsScreen(
     clearHistory: () -> Unit,
     openDiagnostics: () -> Unit,
     openDisclosure: () -> Unit,
+    openFeedback: () -> Unit,
     openDeveloper: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var confirmClear by remember { mutableStateOf(false) }
+    var showAdvanced by remember { mutableStateOf(false) }
     if (confirmClear) {
         AlertDialog(
             onDismissRequest = { confirmClear = false },
-            title = { Text("Clear local history?") },
-            text = { Text("This permanently removes Attention events and tracked in-app activity from this device.") },
+            title = { Text("Clear activity history?") },
+            text = { Text("This permanently deletes your past Task Tunnel activity from this phone. Your protection settings stay the same.") },
             confirmButton = {
                 TextButton(onClick = { clearHistory(); confirmClear = false }) { Text("Clear history", color = MaterialTheme.colorScheme.error) }
             },
@@ -1147,34 +1535,13 @@ fun SettingsScreen(
         contentPadding = PaddingValues(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 12.dp),
     ) {
         item {
-            SectionHeader("Privacy & data", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            SectionHeader("Everyday", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
             SettingsRow(
-                title = "Privacy and Accessibility",
-                subtitle = "What Task Tunnel can see and what stays on this device",
-                leading = { TaskTunnelIcon(TaskTunnelIconKind.INFO, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
-                showChevron = true,
-                onClick = openDisclosure,
-            )
-            RowDivider(inset = true)
-            SettingsRow(
-                title = "Clear local history",
-                subtitle = if (historyAvailable) {
-                    "Remove Attention and tracked usage history from this device"
-                } else {
-                    "History is currently unavailable. Reopen Task Tunnel and try again."
-                },
-                leading = { TaskTunnelIcon(TaskTunnelIconKind.DELETE, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
-                enabled = historyAvailable,
-                onClick = { confirmClear = true },
-            )
-            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
-            SectionHeader("Help & system", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
-            SettingsRow(
-                title = "Tunnel notification controls",
+                title = "Notifications",
                 subtitle = if (notificationControlsEnabled) {
-                    "Continue check-ins, change purpose, or end an active tunnel from notifications"
+                    "Continue, change purpose or end an active Task Tunnel from your notification shade"
                 } else {
-                    "Off — tap to enable notification controls"
+                    "Off — turn these on if you want controls outside the app"
                 },
                 leading = { TaskTunnelIcon(TaskTunnelIconKind.ATTENTION, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
                 showChevron = true,
@@ -1182,30 +1549,261 @@ fun SettingsScreen(
             )
             RowDivider(inset = true)
             SettingsRow(
-                title = "Protection diagnostics",
-                subtitle = "Copy sanitized device and service status",
-                leading = { TaskTunnelIcon(TaskTunnelIconKind.COPY, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                title = "Privacy",
+                subtitle = "See what Task Tunnel notices and what always stays private",
+                leading = { TaskTunnelIcon(TaskTunnelIconKind.INFO, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
                 showChevron = true,
-                onClick = openDiagnostics,
+                onClick = openDisclosure,
             )
-            if (DeveloperDiagnosticsGate.isAvailable(BuildConfig.DEBUG)) {
+            RowDivider(inset = true)
+            SettingsRow(
+                title = "Send feedback",
+                subtitle = "Tell us what felt broken, confusing or worth improving",
+                leading = { TaskTunnelIcon(TaskTunnelIconKind.MESSAGE, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                showChevron = true,
+                onClick = openFeedback,
+            )
+            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
+            SectionHeader("Your data", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            SettingsRow(
+                title = "Clear activity history",
+                subtitle = if (historyAvailable) {
+                    "Delete past Attention and usage activity from this phone"
+                } else {
+                    "Activity history is temporarily unavailable. Reopen Task Tunnel and try again."
+                },
+                leading = { TaskTunnelIcon(TaskTunnelIconKind.DELETE, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                enabled = historyAvailable,
+                onClick = { confirmClear = true },
+            )
+            Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
+            SectionHeader("Advanced", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
+            SettingsRow(
+                title = if (showAdvanced) "Hide advanced options" else "Advanced options",
+                subtitle = "Troubleshooting and technical tools",
+                leading = { TaskTunnelIcon(TaskTunnelIconKind.SETTINGS, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                showChevron = true,
+                onClick = { showAdvanced = !showAdvanced },
+            )
+            if (showAdvanced) {
                 RowDivider(inset = true)
                 SettingsRow(
-                    title = "Developer options",
-                    subtitle = "Debug build only",
-                    leading = { TaskTunnelIcon(TaskTunnelIconKind.SETTINGS, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                    title = "Troubleshooting",
+                    subtitle = "Check Task Tunnel's Android access and copy a safe status report",
+                    leading = { TaskTunnelIcon(TaskTunnelIconKind.COPY, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
                     showChevron = true,
-                    onClick = openDeveloper,
+                    onClick = openDiagnostics,
                 )
+                if (DeveloperDiagnosticsGate.isAvailable(BuildConfig.DEBUG)) {
+                    RowDivider(inset = true)
+                    SettingsRow(
+                        title = "Developer options",
+                        subtitle = "Debug build only",
+                        leading = { TaskTunnelIcon(TaskTunnelIconKind.SETTINGS, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                        showChevron = true,
+                        onClick = openDeveloper,
+                    )
+                }
             }
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("About", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
-            SettingsRow("Task Tunnel", "Private by design · Data stays on this device", trailingText = appVersion)
+            SettingsRow("Task Tunnel", "Core activity stays on this device", trailingText = appVersion)
             Spacer(Modifier.height(24.dp))
         }
     }
 }
 
+@Composable
+fun FeedbackScreen(
+    statusReport: FeedbackStatusReport,
+    feedbackConfigured: Boolean,
+    sendFeedback: suspend (FeedbackDraft) -> FeedbackSubmissionResult,
+    modifier: Modifier = Modifier,
+) {
+    var category by remember { mutableStateOf<FeedbackCategory?>(null) }
+    var note by remember { mutableStateOf("") }
+    var includeStatus by remember { mutableStateOf(false) }
+    var sending by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<FeedbackSubmissionResult?>(null) }
+    val scope = rememberCoroutineScope()
+
+    val currentDraft = category?.let {
+        FeedbackDraft(
+            category = it,
+            note = note,
+            includeStatusReport = includeStatus,
+        )
+    }
+    val canSend = currentDraft != null && note.isNotBlank() && !sending
+
+    LazyColumn(
+        modifier.fillMaxSize(),
+        contentPadding = PaddingValues(
+            horizontal = TaskTunnelTokens.ScreenHorizontalPadding,
+            vertical = 14.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        item {
+            Text(
+                "What should we know?",
+                style = MaterialTheme.typography.titleLarge,
+            )
+            Text(
+                "Tell us what happened in your own words. Your feedback is sent directly from Task Tunnel when you tap Send.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                FeedbackCategory.entries.forEachIndexed { index, item ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !sending) {
+                                category = item
+                                result = null
+                            }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = category == item,
+                            enabled = !sending,
+                            onClick = {
+                                category = item
+                                result = null
+                            },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            item.label,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    if (index != FeedbackCategory.entries.lastIndex) RowDivider()
+                }
+            }
+        }
+
+        item {
+            OutlinedTextField(
+                value = note,
+                onValueChange = {
+                    if (it.length <= 1200) {
+                        note = it
+                        result = null
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !sending,
+                label = { Text("Your feedback") },
+                placeholder = { Text("What happened, what did you expect, or what would make this better?") },
+                supportingText = { Text("${note.length}/1200") },
+                minLines = 5,
+                maxLines = 9,
+                shape = RoundedCornerShape(TaskTunnelTokens.CardRadius),
+            )
+        }
+
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !sending) {
+                        includeStatus = !includeStatus
+                        result = null
+                    }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Checkbox(
+                    checked = includeStatus,
+                    enabled = !sending,
+                    onCheckedChange = {
+                        includeStatus = it
+                        result = null
+                    },
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Include app status", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Adds Task Tunnel version, Android version and whether core controls are on. No activity history or app content is included.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        result?.let { submissionResult ->
+            item {
+                val (title, message) = when (submissionResult) {
+                    FeedbackSubmissionResult.Sent -> "Feedback sent" to "Thanks. It was sent successfully."
+                    FeedbackSubmissionResult.NotConfigured -> "Feedback isn't connected yet" to "This build does not have a feedback destination configured."
+                    FeedbackSubmissionResult.NetworkError -> "Couldn't send feedback" to "Check your internet connection and try again."
+                    FeedbackSubmissionResult.Rejected -> "Couldn't send feedback" to "The feedback service rejected this submission. Try again in a moment."
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        item {
+            Button(
+                onClick = {
+                    val draft = currentDraft ?: return@Button
+                    scope.launch {
+                        sending = true
+                        result = null
+                        val submissionResult = sendFeedback(draft)
+                        sending = false
+                        result = submissionResult
+                        if (submissionResult == FeedbackSubmissionResult.Sent) {
+                            note = ""
+                            category = null
+                            includeStatus = false
+                        }
+                    }
+                },
+                enabled = canSend && feedbackConfigured,
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+            ) {
+                Text(if (sending) "Sending…" else "Send feedback")
+            }
+            Text(
+                if (feedbackConfigured) {
+                    "Feedback leaves this device only when you tap Send."
+                } else {
+                    "Feedback delivery is not configured in this build."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
 @Composable
 fun DiagnosticsScreen(report: DiagnosticReport, modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -1215,9 +1813,9 @@ fun DiagnosticsScreen(report: DiagnosticReport, modifier: Modifier = Modifier) {
         contentPadding = PaddingValues(horizontal = TaskTunnelTokens.ScreenHorizontalPadding, vertical = 16.dp),
     ) {
         item {
-            Text("Sanitized technical status", style = MaterialTheme.typography.titleLarge)
+            Text("Troubleshooting", style = MaterialTheme.typography.titleLarge)
             Text(
-                "This never includes app content, usernames, screenshots, detector internals, or Attention history.",
+                "This status report helps diagnose Android setup problems. It never includes your app content, usernames, screenshots or activity history.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp, bottom = 22.dp),
@@ -1233,17 +1831,31 @@ fun DiagnosticsScreen(report: DiagnosticReport, modifier: Modifier = Modifier) {
                     clipboard.setPrimaryClip(ClipData.newPlainText("Task Tunnel diagnostics", report.asText()))
                     copied = true
                 },
-                modifier = Modifier.fillMaxWidth().padding(top = 22.dp).height(52.dp),
-            ) { Text(if (copied) "Diagnostics copied" else "Copy diagnostics") }
+                modifier = Modifier.fillMaxWidth().padding(top = 22.dp).height(50.dp),
+                shape = RoundedCornerShape(TaskTunnelTokens.ActionRadius),
+            ) { Text(if (copied) "Status copied" else "Copy status report") }
             Spacer(Modifier.height(24.dp))
         }
     }
 }
 
-private fun isToday(timeMillis: Long): Boolean {
-    val now = Calendar.getInstance()
-    val value = Calendar.getInstance().apply { timeInMillis = timeMillis }
-    return now.get(Calendar.ERA) == value.get(Calendar.ERA) &&
-        now.get(Calendar.YEAR) == value.get(Calendar.YEAR) &&
-        now.get(Calendar.DAY_OF_YEAR) == value.get(Calendar.DAY_OF_YEAR)
+private fun startOfLocalDay(timeMillis: Long): Long = Calendar.getInstance().apply {
+    this.timeInMillis = timeMillis
+    set(Calendar.HOUR_OF_DAY, 0)
+    set(Calendar.MINUTE, 0)
+    set(Calendar.SECOND, 0)
+    set(Calendar.MILLISECOND, 0)
+}.timeInMillis
+
+private fun attentionDayLabel(dayStartMillis: Long, nowMillis: Long = System.currentTimeMillis()): String {
+    val todayStart = startOfLocalDay(nowMillis)
+    val yesterday = Calendar.getInstance().apply {
+        timeInMillis = todayStart
+        add(Calendar.DAY_OF_YEAR, -1)
+    }.timeInMillis
+    return when (dayStartMillis) {
+        todayStart -> "Today"
+        yesterday -> "Yesterday"
+        else -> SimpleDateFormat("EEE, MMM d", Locale.getDefault()).format(java.util.Date(dayStartMillis))
+    }
 }

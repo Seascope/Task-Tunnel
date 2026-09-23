@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -42,12 +43,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import com.example.tasktunnel.attention.AttentionApp
 import com.example.tasktunnel.attention.AttentionEpisode
-import com.example.tasktunnel.attention.AttentionEpisodeType
-import com.example.tasktunnel.attention.AttentionEventType
-import com.example.tasktunnel.attention.AttentionSubtype
-import com.example.tasktunnel.attention.episodeSubtitle
-import com.example.tasktunnel.attention.episodeTitle
-import com.example.tasktunnel.attention.surfaceLabel
+import com.example.tasktunnel.attention.episodeHighlight
+import com.example.tasktunnel.attention.taskLabel
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.protection.ProtectionHealth
 import com.example.tasktunnel.protection.ProtectionLevel
@@ -67,7 +64,7 @@ fun SectionHeader(title: String, modifier: Modifier = Modifier) {
     Text(
         title,
         modifier.semantics { heading() },
-        style = MaterialTheme.typography.titleSmall,
+        style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
@@ -141,7 +138,11 @@ fun SettingsRow(
 ) {
     val clickModifier = if (onClick != null) Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick) else Modifier
     Row(
-        modifier.fillMaxWidth().then(clickModifier).defaultMinSize(minHeight = TaskTunnelTokens.MinimumTouchTarget)
+        modifier
+            .fillMaxWidth()
+            .then(clickModifier)
+            .alpha(if (enabled) 1f else 0.5f)
+            .defaultMinSize(minHeight = TaskTunnelTokens.MinimumTouchTarget)
             .padding(vertical = TaskTunnelTokens.RowVerticalPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -150,7 +151,7 @@ fun SettingsRow(
             Spacer(Modifier.width(TaskTunnelTokens.IconTextGap - 6.dp))
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
             subtitle?.let {
                 Text(
                     it,
@@ -163,11 +164,17 @@ fun SettingsRow(
         }
         if (trailingText != null) {
             Spacer(Modifier.width(12.dp))
-            Text(trailingText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                trailingText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         if (showChevron) {
             Spacer(Modifier.width(8.dp))
-            TaskTunnelIcon(TaskTunnelIconKind.CHEVRON, Modifier.size(18.dp), MaterialTheme.colorScheme.onSurfaceVariant)
+            TaskTunnelIcon(TaskTunnelIconKind.CHEVRON, Modifier.size(16.dp), MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -182,26 +189,65 @@ fun RowDivider(modifier: Modifier = Modifier, inset: Boolean = false) {
 }
 
 @Composable
-fun EpisodeRow(episode: AttentionEpisode, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun EpisodeRow(
+    episode: AttentionEpisode,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isLive: Boolean = false,
+) {
     val app = episode.app
-    val packageName = app?.packageName.orEmpty()
-    val duration = formatDuration(episode)
-    Column(modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = TaskTunnelTokens.RowVerticalPadding)) {
+    val purpose = taskLabel(episode.task)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+    ) {
         Row(verticalAlignment = Alignment.Top) {
-            if (app != null) AppIcon(packageName, app.displayName, Modifier.size(TaskTunnelTokens.AppIconSize))
-            else Box(Modifier.size(TaskTunnelTokens.AppIconSize).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant))
+            if (app != null) {
+                AppIcon(app.packageName, app.displayName, Modifier.size(TaskTunnelTokens.AppIconSize))
+            } else {
+                Box(
+                    Modifier
+                        .size(TaskTunnelTokens.AppIconSize)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                )
+            }
             Spacer(Modifier.width(TaskTunnelTokens.IconTextGap))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(episodeTitle(episode), style = MaterialTheme.typography.titleMedium)
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(formatEpisodeRange(episode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(duration, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        app?.displayName ?: "Task Tunnel",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        formatTime(episode.startedAtMillis),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
                 }
-                Text(episodeSubtitle(episode), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                episodeOutcome(episode)?.let { outcome ->
-                    Text(outcome, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    if (isLive) "$purpose · Live" else "$purpose · ${formatEpisodeDuration(episode)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (isLive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                episodeHighlight(episode)?.let { highlight ->
+                    Text(
+                        highlight,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
                 }
             }
         }
@@ -213,22 +259,48 @@ fun DriftEpisodeRow(episode: AttentionEpisode, onClick: () -> Unit, modifier: Mo
     val context = LocalContext.current
     val appPath = episode.involvedPackages
         .joinToString(" → ") { packageName -> DriftAppCatalog.labelFor(context, packageName) }
-        .ifBlank { episodeSubtitle(episode) }
-    Column(modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = TaskTunnelTokens.RowVerticalPadding)) {
+        .ifBlank { episode.involvedApps.joinToString(" → ") { it.displayName } }
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+    ) {
         Row(verticalAlignment = Alignment.Top) {
-            DriftEpisodeIconStack(episode.involvedPackages, Modifier.size(38.dp))
+            DriftEpisodeIconStack(episode.involvedPackages, Modifier.size(40.dp))
             Spacer(Modifier.width(TaskTunnelTokens.IconTextGap))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TaskTunnelTokens.SecondaryTextGap)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Drift episode", style = MaterialTheme.typography.titleMedium)
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(formatEpisodeRange(episode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(formatDuration(episode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Drift check-in",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        formatTime(episode.startedAtMillis),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
                 }
-                Text(appPath, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
-                episodeOutcome(episode)?.let { outcome ->
-                    Text(outcome, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    appPath,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                episodeHighlight(episode)?.let { highlight ->
+                    Text(
+                        highlight,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
                 }
             }
         }
@@ -264,39 +336,8 @@ private fun DriftEpisodeIconStack(packages: List<String>, modifier: Modifier = M
                 modifier = Modifier
                     .size(iconSize)
                     .offset(x = x, y = y)
-                    .border(1.dp, surfaceBorder, iconShape)
+                    .border(1.dp, surfaceBorder, iconShape),
             )
-        }
-    }
-}
-
-private fun episodeOutcome(episode: AttentionEpisode): String? {
-    val intervention = episode.events.lastOrNull { it.type == AttentionEventType.INTERVENTION }
-    val decision = episode.events.lastOrNull { it.type == AttentionEventType.DECISION }
-    if (intervention == null && decision == null) return null
-    val interruptedSurface = intervention?.surface?.let(::surfaceLabel)
-    return when (decision?.subtype) {
-        AttentionSubtype.RETURN -> {
-            val returned = episode.events.lastOrNull { it.subtype == AttentionSubtype.SURFACE_RETURNED }?.surface?.let(::surfaceLabel)
-            listOfNotNull(interruptedSurface, returned?.let { "Returned to $it" }).joinToString(" → ")
-        }
-        AttentionSubtype.ALLOW_ANYWAY -> listOfNotNull(interruptedSurface, "Allowed for 5 min").joinToString(" · ")
-        AttentionSubtype.END_TUNNEL,
-        AttentionSubtype.EXPIRY_FINISH,
-        -> "Session ended after intended use"
-        AttentionSubtype.EXPIRY_CONTINUE -> "Continued for another session"
-        AttentionSubtype.EXPIRY_CHOOSE_ANOTHER -> "Chose another purpose"
-        AttentionSubtype.KEEP_GOING -> "Kept going after the check-in"
-        AttentionSubtype.SET_INTENTION -> "Set an intention after the check-in"
-        AttentionSubtype.CHECK_IN_RETURN -> "Returned to the original purpose"
-        AttentionSubtype.CHECK_IN_CONTINUE -> "Chose to continue intentionally"
-        AttentionSubtype.CHECK_IN_END -> "Ended the Task Tunnel"
-        AttentionSubtype.CHECK_IN_CHOOSE_ANOTHER -> "Chose another purpose"
-        else -> when (intervention?.subtype) {
-            AttentionSubtype.DRIFT_CHECK_IN -> "A gentle check-in was shown"
-            AttentionSubtype.SURFACE_INTERVENTION -> interruptedSurface?.let { "$it needed a decision" }
-            AttentionSubtype.CHECK_IN_SHOWN -> "An intentional check-in was shown"
-            else -> null
         }
     }
 }
@@ -329,7 +370,7 @@ fun formatEpisodeRange(episode: AttentionEpisode): String {
     return if (start == end) start else "$start – $end"
 }
 
-private fun formatDuration(episode: AttentionEpisode): String {
+fun formatEpisodeDuration(episode: AttentionEpisode): String {
     val minutes = max(1L, (episode.endedAtMillis - episode.startedAtMillis + 59_999L) / 60_000L)
     return "$minutes min"
 }

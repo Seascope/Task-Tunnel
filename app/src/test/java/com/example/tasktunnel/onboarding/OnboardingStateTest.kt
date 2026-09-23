@@ -14,25 +14,32 @@ class OnboardingStateTest {
     }
 
     @Test
-    fun disclosureContinuesToVerification() {
-        val progress = OnboardingFlow.next(OnboardingProgress(step = OnboardingStep.DISCLOSURE))
-        assertEquals(OnboardingStep.VERIFY, progress.step)
-    }
-
-    @Test
-    fun permissionDeclineCanContinueToConfiguration() {
-        val progress = OnboardingFlow.next(OnboardingProgress(step = OnboardingStep.VERIFY))
-        assertEquals(OnboardingStep.CONFIGURE, progress.step)
-    }
-
-    @Test
-    fun completionPreventsOnboardingReentry() {
-        val progress = OnboardingFlow.next(OnboardingProgress(step = OnboardingStep.CONFIGURE))
+    fun flowMovesThroughRealSetupStages() {
+        var progress = OnboardingProgress()
+        progress = OnboardingFlow.next(progress)
+        assertEquals(OnboardingStep.APPS, progress.step)
+        progress = OnboardingFlow.next(progress)
+        assertEquals(OnboardingStep.ACCESSIBILITY, progress.step)
+        progress = OnboardingFlow.next(progress)
+        assertEquals(OnboardingStep.DRIFT, progress.step)
+        progress = OnboardingFlow.next(progress)
+        assertEquals(OnboardingStep.TRY, progress.step)
+        progress = OnboardingFlow.next(progress)
+        assertEquals(OnboardingStep.READY, progress.step)
+        progress = OnboardingFlow.next(progress)
         assertTrue(progress.completed)
     }
 
     @Test
     fun setupLaterLeavesAppUsable() {
         assertTrue(OnboardingFlow.completeLater().completed)
+    }
+
+    @Test
+    fun checklistOnlyCompletesWhenCoreSetupActuallyWorks() {
+        assertFalse(SetupChecklistState(true, true, false).complete)
+        assertFalse(SetupChecklistState(true, false, true).complete)
+        assertFalse(SetupChecklistState(false, true, true).complete)
+        assertTrue(SetupChecklistState(true, true, true).complete)
     }
 }

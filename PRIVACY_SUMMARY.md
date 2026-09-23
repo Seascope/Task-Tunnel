@@ -2,7 +2,7 @@
 
 ## Plain-language summary
 
-Task Tunnel runs locally on the Android device. The MVP has no account, cloud backend, analytics SDK, or telemetry. It uses Accessibility access to understand a narrow set of visible Instagram, YouTube, and TikTok surfaces and protect a purpose chosen by the user.
+Task Tunnel runs locally on the Android device. The MVP has no account, sync backend, analytics SDK, or telemetry. Core protection and activity processing stay on-device. The optional feedback form sends only the user-entered feedback and explicitly selected safe status fields when the user taps Send. It uses Accessibility access to understand a narrow set of visible Instagram, YouTube, and TikTok surfaces and protect a purpose chosen by the user.
 
 ## Data used while protection runs
 
@@ -31,6 +31,8 @@ The diagnostic report excludes app content, message text, usernames, accessibili
 
 ## External services
 
-The MVP has no Internet permission. The Drift picker uses normal launcher-intent visibility to list launchable apps and excludes Task Tunnel itself; `QUERY_ALL_PACKAGES` is not requested. Detailed accessibility-tree classification remains limited to Instagram, YouTube, and TikTok.
+Task Tunnel declares Internet permission only so the explicit in-app feedback form can submit to the configured Formspree endpoint. No background analytics, telemetry, detector rules, activity history, accessibility text, or app content is uploaded. If the user enables **Include app status**, the submission adds only app version, Android version, Accessibility on/off, master protection on/off, Drift on/off, and notification-controls on/off.
+
+The Drift picker uses normal launcher-intent visibility to list launchable apps and excludes Task Tunnel itself; `QUERY_ALL_PACKAGES` is not requested. Detailed accessibility-tree classification remains limited to Instagram, YouTube, and TikTok.
 
 Before Play submission, the developer must publish a final privacy policy and reconcile this summary with the live Data safety form and current AccessibilityService policy.

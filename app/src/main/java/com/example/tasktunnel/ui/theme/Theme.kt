@@ -21,6 +21,13 @@ private val TaskTunnelColors = darkColorScheme(
     onBackground = TextPrimary,
     surface = Canvas,
     onSurface = TextPrimary,
+    surfaceDim = Canvas,
+    surfaceBright = SurfaceHigh,
+    surfaceContainerLowest = Canvas,
+    surfaceContainerLow = SurfaceGraphite,
+    surfaceContainer = SurfaceGraphite,
+    surfaceContainerHigh = SurfaceRaised,
+    surfaceContainerHighest = SurfaceHigh,
     surfaceVariant = SurfaceGraphite,
     onSurfaceVariant = TextSecondary,
     outline = Divider,
@@ -32,8 +39,8 @@ private val TaskTunnelShapes = Shapes(
     extraSmall = RoundedCornerShape(6.dp),
     small = RoundedCornerShape(10.dp),
     medium = RoundedCornerShape(14.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(22.dp),
 )
 
 @Composable
