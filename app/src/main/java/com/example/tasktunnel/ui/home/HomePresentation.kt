@@ -66,6 +66,19 @@ data class HomeTaskContextUsage(
     val durationMillis: Long,
 )
 
+internal fun homeActivityScopeLabel(activeApps: List<AttentionApp>): String {
+    val names = activeApps
+        .distinct()
+        .map(AttentionApp::displayName)
+
+    return when (names.size) {
+        0 -> "across your protected apps"
+        1 -> "on ${names.first()}"
+        2 -> "across ${names[0]} & ${names[1]}"
+        else -> "across ${names.dropLast(1).joinToString(", ")} & ${names.last()}"
+    }
+}
+
 fun formatHomeDuration(durationMillis: Long): String {
     val totalMinutes = (durationMillis.coerceAtLeast(0L) / MILLIS_PER_MINUTE).toInt()
     if (totalMinutes < 1) return "<1 min"

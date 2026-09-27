@@ -39,6 +39,19 @@ class HomeUsagePresentationTest {
     }
 
     @Test
+    fun homeActivityScopeLabel_describesOnlyAppsWithActivity() {
+        assertEquals("on Instagram", homeActivityScopeLabel(listOf(AttentionApp.INSTAGRAM)))
+        assertEquals(
+            "across Instagram & YouTube",
+            homeActivityScopeLabel(listOf(AttentionApp.INSTAGRAM, AttentionApp.YOUTUBE)),
+        )
+        assertEquals(
+            "across Instagram, YouTube & TikTok",
+            homeActivityScopeLabel(listOf(AttentionApp.INSTAGRAM, AttentionApp.YOUTUBE, AttentionApp.TIKTOK)),
+        )
+    }
+
+    @Test
     fun compactSurfaceRows_doesNotInventOtherWhenEverythingFits() {
         val app = usage(
             HomeSurfaceUsage(HomeSurfaceKind.VIDEO, 20),

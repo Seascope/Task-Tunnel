@@ -17,6 +17,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -99,7 +102,10 @@ private fun HomeLoaded(
             if (apps.isEmpty()) {
                 EmptyTodayState(health, turnProtectionOn)
             } else {
-                TodayHero(presentation.totalTrackedTodayMillis)
+                TodayHero(
+                    totalTrackedTodayMillis = presentation.totalTrackedTodayMillis,
+                    activeApps = apps.map(HomeAppUsage::app),
+                )
                 if (health.level != ProtectionLevel.ACTIVE) {
                     Spacer(Modifier.height(16.dp))
                     HomeProtectionNotice(health, turnProtectionOn)
@@ -113,7 +119,7 @@ private fun HomeLoaded(
         apps.forEachIndexed { index, app ->
             item {
                 AppUsageSection(app = app, maxAppDurationMillis = maxAppDuration)
-                if (index < apps.lastIndex) Spacer(Modifier.height(24.dp))
+                if (index < apps.lastIndex) Spacer(Modifier.height(14.dp))
             }
         }
 
@@ -133,7 +139,10 @@ private fun HomeLoaded(
 }
 
 @Composable
-private fun TodayHero(totalTrackedTodayMillis: Long) {
+private fun TodayHero(
+    totalTrackedTodayMillis: Long,
+    activeApps: List<AttentionApp>,
+) {
     Text(
         formatHomeDuration(totalTrackedTodayMillis),
         style = MaterialTheme.typography.displaySmall.copy(fontFeatureSettings = "tnum"),
@@ -141,7 +150,7 @@ private fun TodayHero(totalTrackedTodayMillis: Long) {
     )
     Spacer(Modifier.height(2.dp))
     Text(
-        "across Instagram, YouTube & TikTok",
+        homeActivityScopeLabel(activeApps),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -233,9 +242,10 @@ private fun AppUsageSection(
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .clickable(role = Role.Button) { expanded = !expanded }
-            .padding(vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 15.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             AppIcon(app.app.packageName, app.app.displayName, Modifier.size(40.dp))
@@ -247,12 +257,12 @@ private fun AppUsageSection(
                 color = MaterialTheme.colorScheme.onSurface,
             )
         }
-        Spacer(Modifier.height(11.dp))
+        Spacer(Modifier.height(13.dp))
         UsageBar(
             fraction = app.totalTrackedDurationMillis.toFloat() / maxAppDurationMillis.coerceAtLeast(1L).toFloat(),
             emphasized = true,
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 summary,
@@ -262,16 +272,32 @@ private fun AppUsageSection(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                if (expanded) "Hide" else "Details",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            Spacer(Modifier.width(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Details",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(2.dp))
+                Icon(
+                    imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = if (expanded) "Hide activity details" else "Show activity details",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
 
         if (expanded) {
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(TaskTunnelTokens.DividerThickness)
+                    .background(MaterialTheme.colorScheme.outlineVariant),
+            )
+            Spacer(Modifier.height(14.dp))
             SurfaceBreakdown(app)
         }
     }
@@ -280,21 +306,25 @@ private fun AppUsageSection(
 @Composable
 private fun SurfaceBreakdown(app: HomeAppUsage) {
     val rows = app.compactSurfaceRows()
-    val maxSurfaceDuration = rows.maxOfOrNull(HomeSurfaceDisplayUsage::durationMillis) ?: 1L
+    val totalDuration = app.totalTrackedDurationMillis.coerceAtLeast(1L)
 
     Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 52.dp),
-        verticalArrangement = Arrangement.spacedBy(13.dp),
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        rows.forEachIndexed { index, surface ->
+        Text(
+            "Activity breakdown",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+
+        rows.forEach { surface ->
             SurfaceBreakdownRow(
                 surface = surface,
-                maxSurfaceDurationMillis = maxSurfaceDuration,
-                rank = index,
+                totalDurationMillis = totalDuration,
             )
         }
+
         if (app.shouldDeemphasizeComposition || app.showMeaningfulUnclassifiedNote) {
             Text(
                 if (app.shouldDeemphasizeComposition) {
@@ -304,7 +334,7 @@ private fun SurfaceBreakdown(app: HomeAppUsage) {
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp),
+                modifier = Modifier.padding(top = 1.dp),
             )
         }
     }
@@ -313,41 +343,36 @@ private fun SurfaceBreakdown(app: HomeAppUsage) {
 @Composable
 private fun SurfaceBreakdownRow(
     surface: HomeSurfaceDisplayUsage,
-    maxSurfaceDurationMillis: Long,
-    rank: Int,
+    totalDurationMillis: Long,
 ) {
-    val textColor = if (surface.isOther) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        SurfaceStatIcon(surface.kind, muted = surface.isOther)
-        Spacer(Modifier.width(10.dp))
-        Text(
-            surface.label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = textColor,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            formatHomeDuration(surface.durationMillis),
-            style = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = "tnum"),
-            color = textColor,
-            textAlign = TextAlign.End,
+    val textColor = MaterialTheme.colorScheme.onSurface
+
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            SurfaceStatIcon(surface.kind, muted = false)
+            Spacer(Modifier.width(10.dp))
+            Text(
+                surface.label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = textColor,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                formatHomeDuration(surface.durationMillis),
+                style = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = "tnum"),
+                color = textColor,
+                textAlign = TextAlign.End,
+            )
+        }
+        Spacer(Modifier.height(7.dp))
+        UsageBar(
+            fraction = surface.durationMillis.toFloat() / totalDurationMillis.toFloat(),
+            emphasized = true,
         )
     }
-    Spacer(Modifier.height(5.dp))
-    UsageBar(
-        fraction = surface.durationMillis.toFloat() / maxSurfaceDurationMillis.coerceAtLeast(1L).toFloat(),
-        emphasized = !surface.isOther,
-        alpha = when (rank) {
-            0 -> 1f
-            1 -> 0.72f
-            2 -> 0.54f
-            else -> 0.38f
-        },
-    )
 }
-
 
 @Composable
 private fun SurfaceStatIcon(kind: HomeSurfaceKind, muted: Boolean) {

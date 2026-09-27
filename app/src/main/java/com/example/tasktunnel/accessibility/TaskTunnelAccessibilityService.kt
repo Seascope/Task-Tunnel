@@ -39,6 +39,7 @@ import com.example.tasktunnel.detector.InstagramSurfaceDetector
 import com.example.tasktunnel.detector.InstagramSurface
 import com.example.tasktunnel.detector.YouTubeSurfaceDetector
 import com.example.tasktunnel.detector.YouTubeSurface
+import com.example.tasktunnel.detector.YouTubeWatchSubscriptionGuard
 import com.example.tasktunnel.detector.TikTokSurfaceDetector
 import com.example.tasktunnel.detector.TikTokSurface
 import com.example.tasktunnel.diagnostics.SanitizedFingerprint
@@ -149,11 +150,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private var youTubeSearchContextActive = false
     /**
      * A YouTube click can briefly leave the previous watch-page accessibility nodes alive while
-     * the next video is loading. When a subscriptions tunnel is active, take two bounded settled
-     * re-captures so creator subscription state is read from the new video, not the old one.
+     * the next video is loading. When a subscriptions tunnel is active, take a couple of bounded
+     * settled re-captures to reach the new watch surface. If the watch surface is present but its
+     * Subscribe/Subscribed control has not loaded yet, keep probing at a capped backoff until the
+     * relation resolves or the user leaves the watch surface. This preserves fail-open behavior
+     * while preventing slow network/UI loading from permanently bypassing subscription checks.
      */
     private var youTubeSubscriptionProbeAttemptsRemaining = 0
     private var youTubeSubscriptionProbePending = false
+    private var youTubeSubscriptionProbeWatchingUnresolvedSurface = false
+    private var youTubeSubscriptionProbeDelayMs = YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS
+    private val youTubeWatchSubscriptionGuard = YouTubeWatchSubscriptionGuard()
     private var lastCaptureAtElapsed = 0L
     private var lastTargetPackage: String? = null
     private val showOverlay = Runnable { if (protectionEnabled) showTestOverlayNow() }
@@ -305,6 +312,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             youTubeSearchContextActive = false
             clearYouTubeSubscriptionProbe()
+            youTubeWatchSubscriptionGuard.reset()
         }
         if (packageName != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) AccessibilityRuntime.clearCurrentInstagramDetection()
         if (packageName != TikTokSurfaceDetector.TIKTOK_PACKAGE) AccessibilityRuntime.clearCurrentTikTokCapture()
@@ -319,9 +327,29 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         )
         updateTunnelUi()
         val activeSession = tunnelCoordinator.state.activeSession
-        if (packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE &&
-            activeSession?.task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
-            activeSession.app.packageName == packageName &&
+        val isYouTubeSubscriptionsSession =
+            packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE &&
+                activeSession?.task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
+                activeSession.app.packageName == packageName
+
+        if (isYouTubeSubscriptionsSession &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
+            AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface == YouTubeSurface.YOUTUBE_VIDEO
+        ) {
+            // The watch page can expose Subscribe buttons belonging to community posts/comments
+            // once the user scrolls below the video's own creator row. From this point, keep the
+            // creator relationship that was resolved before the scroll (or UNKNOWN if none was).
+            youTubeWatchSubscriptionGuard.onLongFormScrolled()
+        }
+        if (isYouTubeSubscriptionsSession &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+            eventLikelyOpensYouTubeVideo(event)
+        ) {
+            // A recommendation/next-video click starts a different creator context. Raw labels are
+            // inspected only long enough to derive this boolean and are never retained.
+            youTubeWatchSubscriptionGuard.reset()
+        }
+        if (isYouTubeSubscriptionsSession &&
             (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
                 event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
                 event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED)
@@ -330,8 +358,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             // Start the settled probe immediately from the navigation event itself. Previously
             // we waited for the first capture to already classify as Video/Shorts; a transitional
             // UNKNOWN/tab capture could therefore prevent the verification pass entirely.
-            youTubeSubscriptionProbeAttemptsRemaining = YOUTUBE_SUBSCRIPTION_PROBE_ATTEMPTS
-            scheduleYouTubeSubscriptionProbeIfNeeded()
+            restartYouTubeSubscriptionProbeForNavigation()
         }
         if (!isWindowEvent) {
             if (
@@ -1002,7 +1029,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     packageName = packageName,
                     nodes = sanitizedNodes,
                     searchContextActive = youTubeSearchContextActive,
-                ).also { result ->
+                ).let(youTubeWatchSubscriptionGuard::stabilize).also { result ->
                     when (result.surface) {
                         YouTubeSurface.YOUTUBE_SEARCH -> youTubeSearchContextActive = true
                         YouTubeSurface.YOUTUBE_HOME,
@@ -1079,9 +1106,25 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 if (task == TunnelTask.YOUTUBE_SUBSCRIPTIONS &&
                     (it.surface == YouTubeSurface.YOUTUBE_VIDEO || it.surface == YouTubeSurface.YOUTUBE_SHORTS)
                 ) {
-                    scheduleYouTubeSubscriptionProbeIfNeeded()
+                    if (it.creatorSubscriptionState == null) {
+                        youTubeSubscriptionProbeWatchingUnresolvedSurface = true
+                        scheduleYouTubeSubscriptionProbeIfNeeded()
+                    } else {
+                        clearYouTubeSubscriptionProbe()
+                    }
                 } else if (task != TunnelTask.YOUTUBE_SUBSCRIPTIONS) {
                     clearYouTubeSubscriptionProbe()
+                } else if (youTubeSubscriptionProbeWatchingUnresolvedSurface &&
+                    it.surface != YouTubeSurface.UNKNOWN
+                ) {
+                    // Once an unresolved watch page has been seen, a settled non-watch surface
+                    // means the user left it. Do not keep a background polling loop alive.
+                    clearYouTubeSubscriptionProbe()
+                } else if (youTubeSubscriptionProbeAttemptsRemaining > 0) {
+                    // The first settled capture after a click can still be the previous tab or an
+                    // UNKNOWN transition. Finish the bounded pre-watch probes before giving up on
+                    // reaching a watch surface.
+                    scheduleYouTubeSubscriptionProbeIfNeeded()
                 }
                 surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
                 tunnelCoordinator.state.activeSession
@@ -1093,11 +1136,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 if (instagramDirectedNavigationInProgress) return@let
                 val surface = it.surface.toTunnelSurface()
                 val task = tunnelCoordinator.state.activeSession?.takeIf { session -> session.app.packageName == packageName }?.task
+                val policySurface = it.toPolicyTunnelSurface(task)
                 surfaceUsageTracker.observe(packageName, surface, task, capturedAt)
                 tunnelCoordinator.state.activeSession
                     ?.takeIf { session -> session.status == TunnelStatus.ACTIVE && session.app.packageName == packageName }
                     ?.let { session -> attentionRecorder.surfaceObserved(session, surface, capturedAt) }
-                tunnelCoordinator.observeSurface(surface, capturedAt)
+                tunnelCoordinator.observeSurface(policySurface, capturedAt)
             }
             tikTokDetection?.let {
                 // Routing from Inbox/Profile to Search may briefly pass through For You because
@@ -1128,6 +1172,35 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     inspectionDetail = "Tree inspection failed safely; any shown capture is older.",
                 ) else it
             }
+        }
+    }
+
+    private fun eventLikelyOpensYouTubeVideo(event: AccessibilityEvent): Boolean {
+        var node = try { event.source } catch (_: RuntimeException) { null } ?: return false
+        var ownsNode = true
+        return try {
+            repeat(5) {
+                val labels = buildList {
+                    try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+                    try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+                }
+                if (labels.any { label ->
+                        val normalized = label.lowercase(java.util.Locale.ROOT)
+                        normalized == "play video" ||
+                            normalized.endsWith(" - play video") ||
+                            normalized.endsWith(", play video")
+                    }
+                ) {
+                    return true
+                }
+                val parent = try { node.parent } catch (_: RuntimeException) { null } ?: return false
+                if (ownsNode) recycleNode(node)
+                node = parent
+                ownsNode = true
+            }
+            false
+        } finally {
+            if (ownsNode) recycleNode(node)
         }
     }
 
@@ -1261,16 +1334,40 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun restartYouTubeSubscriptionProbeForNavigation() {
+        // A click may represent a new video, so discard any relation/backoff from the previous
+        // watch page and start from a short settle delay again.
+        handler.removeCallbacks(youTubeSubscriptionProbe)
+        youTubeSubscriptionProbePending = false
+        youTubeSubscriptionProbeWatchingUnresolvedSurface = false
+        youTubeSubscriptionProbeAttemptsRemaining = YOUTUBE_SUBSCRIPTION_PROBE_ATTEMPTS
+        youTubeSubscriptionProbeDelayMs = YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS
+        scheduleYouTubeSubscriptionProbeIfNeeded()
+    }
+
     private fun scheduleYouTubeSubscriptionProbeIfNeeded() {
-        if (youTubeSubscriptionProbeAttemptsRemaining <= 0 || youTubeSubscriptionProbePending) return
-        youTubeSubscriptionProbeAttemptsRemaining -= 1
+        if (youTubeSubscriptionProbePending) return
+        if (!youTubeSubscriptionProbeWatchingUnresolvedSurface &&
+            youTubeSubscriptionProbeAttemptsRemaining <= 0
+        ) return
+
+        if (!youTubeSubscriptionProbeWatchingUnresolvedSurface) {
+            youTubeSubscriptionProbeAttemptsRemaining -= 1
+        }
+        val delayMs = youTubeSubscriptionProbeDelayMs
         youTubeSubscriptionProbePending = true
-        handler.postDelayed(youTubeSubscriptionProbe, YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS)
+        handler.postDelayed(youTubeSubscriptionProbe, delayMs)
+        if (youTubeSubscriptionProbeWatchingUnresolvedSurface) {
+            youTubeSubscriptionProbeDelayMs =
+                (youTubeSubscriptionProbeDelayMs * 2).coerceAtMost(5_000L)
+        }
     }
 
     private fun clearYouTubeSubscriptionProbe() {
         youTubeSubscriptionProbeAttemptsRemaining = 0
         youTubeSubscriptionProbePending = false
+        youTubeSubscriptionProbeWatchingUnresolvedSurface = false
+        youTubeSubscriptionProbeDelayMs = YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS
         handler.removeCallbacks(youTubeSubscriptionProbe)
     }
 
@@ -1656,7 +1753,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
         addView(purposeGateAppIdentity(prompt.app))
         addView(purposeGateQuestion())
-        val durationSelector = purposeDurationSelector()
+        val durationSelector = purposeDurationSelector().apply {
+            // When changing purpose, the current tunnel can have a remaining duration that is
+            // not one of the preset choices (for example 8 minutes left from a 10-minute tunnel).
+            // Do not falsely highlight "No limit" in that case.
+            selectDuration(selectedDurationMillis)
+        }
         val durationValue = TextView(context).apply {
             text = when {
                 prompt.preservedDurationMillis != null -> formatRemainingDuration(prompt.preservedDurationMillis)
@@ -3453,7 +3555,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private inner class PurposeDurationSelector : LinearLayout(this@TaskTunnelAccessibilityService) {
         var onDurationSelected: ((DurationChoice) -> Unit)? = null
         private val optionViews = mutableListOf<TextView>()
-        private var selectedIndex = 0
+        private var selectedIndex = -1
 
         init {
             orientation = LinearLayout.HORIZONTAL
@@ -3483,11 +3585,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
 
         fun selectDuration(durationMillis: Long?) {
-            val index = DURATION_CHOICES.indexOfFirst { it.durationMillis == durationMillis }
-            if (index >= 0) {
-                selectedIndex = index
-                updateSelection()
-            }
+            selectedIndex = DURATION_CHOICES.indexOfFirst { it.durationMillis == durationMillis }
+            updateSelection()
         }
 
         private fun updateSelection() {
