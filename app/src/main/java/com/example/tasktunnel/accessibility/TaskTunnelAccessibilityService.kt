@@ -135,6 +135,10 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private var instagramDirectedNavigationInProgress = false
     private var youTubeDirectedNavigationInProgress = false
     private var tikTokDirectedNavigationInProgress = false
+    // Ephemeral semantic surfaces used while directed navigation suppresses normal coordinator
+    // observation. Keep these in-memory enums only; no accessibility text is retained.
+    private var latestInstagramSurfaceForRouting: InstagramSurface? = null
+    private var latestTikTokSurfaceForRouting: TikTokSurface? = null
     private var directedNavigationGeneration = 0L
     private var directedNavigationOwnerSessionId: String? = null
     private var directedNavigationOwnerPackage: String? = null
@@ -931,6 +935,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         lastCaptureAtElapsed = SystemClock.elapsedRealtime()
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { null }
         if (root == null) {
+            latestInstagramSurfaceForRouting = null
+            latestTikTokSurfaceForRouting = null
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
             AccessibilityRuntime.clearCurrentTikTokCapture()
@@ -945,6 +951,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
         val packageName = try { root.packageName?.toString() } catch (_: RuntimeException) {
             recycleNode(root)
+            latestInstagramSurfaceForRouting = null
+            latestTikTokSurfaceForRouting = null
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
             AccessibilityRuntime.clearCurrentTikTokCapture()
@@ -958,13 +966,20 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             return
         } ?: run {
             recycleNode(root)
+            latestInstagramSurfaceForRouting = null
+            latestTikTokSurfaceForRouting = null
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
             AccessibilityRuntime.clearCurrentTikTokCapture()
             failOpenCurrentSurface()
             return
         }
-        if (packageName !in TARGET_PACKAGES) { recycleNode(root); return }
+        if (packageName !in TARGET_PACKAGES) {
+            latestInstagramSurfaceForRouting = null
+            latestTikTokSurfaceForRouting = null
+            recycleNode(root)
+            return
+        }
         data class PendingNode(val node: AccessibilityNodeInfo, val depth: Int, val parentIndex: Int?)
         val stack = ArrayDeque<PendingNode>()
         try {
@@ -1048,6 +1063,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             val tikTokDetection = if (packageName == TikTokSurfaceDetector.TIKTOK_PACKAGE) {
                 TikTokSurfaceDetector.detect(packageName, sanitizedNodes)
             } else null
+            latestInstagramSurfaceForRouting = instagramDetection?.surface
+            latestTikTokSurfaceForRouting = tikTokDetection?.surface
             AccessibilityRuntime.update {
                 val observedYouTube = detection?.let { result ->
                     ObservedYouTubeDetection(
@@ -1162,6 +1179,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             updateTunnelUi()
         } catch (_: RuntimeException) {
             while (stack.isNotEmpty()) recycleNode(stack.removeLast().node)
+            latestInstagramSurfaceForRouting = null
+            latestTikTokSurfaceForRouting = null
             AccessibilityRuntime.clearCurrentYouTubeDetection()
             AccessibilityRuntime.clearCurrentInstagramDetection()
             AccessibilityRuntime.clearCurrentTikTokCapture()
@@ -2429,15 +2448,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             updateTunnelUi()
             return
         }
-        if (task == TunnelTask.INSTAGRAM_MESSAGES) {
-            instagramDirectedNavigationInProgress = true
-            if (navigateToTaskDestination(task)) {
-                finishInstagramDirectedNavigationAfterSettle()
-            } else {
-                failInstagramDirectedNavigation()
-            }
-            return
-        }
         if (task == TunnelTask.TIKTOK_SEARCH_WATCH) {
             navigateToTikTokSearch()
             return
@@ -2446,7 +2456,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             navigateToTikTokInbox()
             return
         }
-        if (task == TunnelTask.INSTAGRAM_SEARCH || task == TunnelTask.INSTAGRAM_POST) {
+        if (task == TunnelTask.INSTAGRAM_MESSAGES || task == TunnelTask.INSTAGRAM_SEARCH || task == TunnelTask.INSTAGRAM_POST) {
             navigateToInstagramDestination(task)
             return
         }
@@ -2468,63 +2478,63 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     }
 
     private fun navigateToInstagramDestination(task: TunnelTask) {
+        instagramDirectedNavigationInProgress = true
+        captureCurrentRoot()
+        if (DirectedNavigationPolicy.instagramDestinationReached(task, currentInstagramSurface())) {
+            completeDirectedNavigation(SupportedApp.INSTAGRAM)
+            return
+        }
+
         if (task == TunnelTask.INSTAGRAM_POST) {
             navigateToInstagramCreate()
             return
         }
 
-        instagramDirectedNavigationInProgress = true
         if (navigateToTaskDestination(task)) {
-            finishInstagramDirectedNavigationAfterSettle()
+            verifyInstagramDestinationAfterSettle(task, allowMainFeedRecovery = true)
             return
         }
-
-        // Search is a directed destination, but blindly pressing global Back to expose the
-        // bottom navigation can leave Instagram entirely when the current screen is already a
-        // top-level shell whose affordance changed across an app update. Re-open Instagram's
-        // own main feed instead, then make one bounded retry from a known in-app destination.
-        if (!openInstagramMainFeed()) {
-            failInstagramDirectedNavigation()
-            return
-        }
-        postDirectedNavigationStep(SupportedApp.INSTAGRAM, INSTAGRAM_MAIN_FEED_SETTLE_MS) {
-            if (navigateToTaskDestination(task)) {
-                finishInstagramDirectedNavigationAfterSettle()
-            } else {
-                failInstagramDirectedNavigation()
-            }
-        }
+        recoverInstagramDestinationViaMainFeed(task)
     }
 
     /**
      * Instagram moves its Create entry point between bottom navigation and action/profile bars
-     * across builds. Do not use blind GLOBAL_ACTION_BACK retries for posting: from a top-level
-     * Instagram screen that can background the app. Instead, try Create in-place, route to a
-     * known main-shell destination, and retry from there/profile.
+     * across builds. ACTION_CLICK=true only means the node accepted the click; verify the
+     * detector's semantic destination before releasing routing arbitration.
      */
     private fun navigateToInstagramCreate() {
         instagramDirectedNavigationInProgress = true
-        if (isInstagramCreateFlowVisible()) {
-            finishInstagramDirectedNavigationAfterSettle()
+        captureCurrentRoot()
+        if (DirectedNavigationPolicy.instagramDestinationReached(TunnelTask.INSTAGRAM_POST, currentInstagramSurface())) {
+            completeDirectedNavigation(SupportedApp.INSTAGRAM)
             return
         }
         if (clickInstagramCreateAffordance()) {
-            finishInstagramDirectedNavigationAfterSettle()
+            verifyInstagramDestinationAfterSettle(TunnelTask.INSTAGRAM_POST, allowMainFeedRecovery = true)
             return
         }
 
         when {
             clickInstagramHomeAffordance() ->
-                postDirectedNavigationStep(SupportedApp.INSTAGRAM, DESTINATION_NAVIGATION_SETTLE_MS) { retryInstagramCreateFromMainShell() }
+                postDirectedNavigationStep(SupportedApp.INSTAGRAM, INSTAGRAM_MAIN_FEED_SETTLE_MS) {
+                    retryInstagramCreateFromMainShell()
+                }
             openInstagramMainFeed() ->
-                postDirectedNavigationStep(SupportedApp.INSTAGRAM, INSTAGRAM_MAIN_FEED_SETTLE_MS) { retryInstagramCreateFromMainShell() }
+                postDirectedNavigationStep(SupportedApp.INSTAGRAM, INSTAGRAM_MAIN_FEED_SETTLE_MS) {
+                    retryInstagramCreateFromMainShell()
+                }
             else -> failInstagramDirectedNavigation()
         }
     }
 
     private fun retryInstagramCreateFromMainShell() {
-        if (isInstagramCreateFlowVisible() || clickInstagramCreateAffordance()) {
-            finishInstagramDirectedNavigationAfterSettle()
+        captureCurrentRoot()
+        if (DirectedNavigationPolicy.instagramDestinationReached(TunnelTask.INSTAGRAM_POST, currentInstagramSurface())) {
+            completeDirectedNavigation(SupportedApp.INSTAGRAM)
+            return
+        }
+        if (clickInstagramCreateAffordance()) {
+            verifyInstagramDestinationAfterSettle(TunnelTask.INSTAGRAM_POST, allowMainFeedRecovery = false)
             return
         }
         if (!clickInstagramProfileAffordance()) {
@@ -2532,19 +2542,74 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             return
         }
         postDirectedNavigationStep(SupportedApp.INSTAGRAM, DESTINATION_NAVIGATION_SETTLE_MS) {
-            if (isInstagramCreateFlowVisible() || clickInstagramCreateAffordance()) {
-                finishInstagramDirectedNavigationAfterSettle()
+            captureCurrentRoot()
+            if (DirectedNavigationPolicy.instagramDestinationReached(TunnelTask.INSTAGRAM_POST, currentInstagramSurface())) {
+                completeDirectedNavigation(SupportedApp.INSTAGRAM)
+            } else if (clickInstagramCreateAffordance()) {
+                verifyInstagramDestinationAfterSettle(TunnelTask.INSTAGRAM_POST, allowMainFeedRecovery = false)
             } else {
                 failInstagramDirectedNavigation()
             }
         }
     }
 
-    private fun finishInstagramDirectedNavigationAfterSettle() {
-        postDirectedNavigationStep(SupportedApp.INSTAGRAM, DESTINATION_NAVIGATION_SETTLE_MS) {
-            completeDirectedNavigation(SupportedApp.INSTAGRAM)
+    private fun verifyInstagramDestinationAfterSettle(
+        task: TunnelTask,
+        allowMainFeedRecovery: Boolean,
+        allowMessagesDeepLinkFallback: Boolean = true,
+    ) {
+        postDirectedNavigationStep(SupportedApp.INSTAGRAM, DIRECTED_DESTINATION_VERIFY_SETTLE_MS) {
+            captureCurrentRoot()
+            if (DirectedNavigationPolicy.instagramDestinationReached(task, currentInstagramSurface())) {
+                completeDirectedNavigation(SupportedApp.INSTAGRAM)
+            } else if (
+                task == TunnelTask.INSTAGRAM_MESSAGES &&
+                allowMessagesDeepLinkFallback &&
+                openInstagramDirectInbox()
+            ) {
+                // direct_tab can accept the click while a nested overlay stays on top. Use one
+                // bounded inbox deep-link fallback, then verify again instead of trusting launch.
+                verifyInstagramDestinationAfterSettle(
+                    task = task,
+                    allowMainFeedRecovery = allowMainFeedRecovery,
+                    allowMessagesDeepLinkFallback = false,
+                )
+            } else if (allowMainFeedRecovery) {
+                recoverInstagramDestinationViaMainFeed(task)
+            } else {
+                failInstagramDirectedNavigation()
+            }
         }
     }
+
+    /**
+     * Do not blindly press Back from Instagram's top-level Reels/Profile/Home screens: that can
+     * background Instagram. Reset to Instagram's own main feed and retry the named destination.
+     */
+    private fun recoverInstagramDestinationViaMainFeed(task: TunnelTask) {
+        if (!openInstagramMainFeed()) {
+            failInstagramDirectedNavigation()
+            return
+        }
+        postDirectedNavigationStep(SupportedApp.INSTAGRAM, INSTAGRAM_MAIN_FEED_SETTLE_MS) {
+            captureCurrentRoot()
+            if (DirectedNavigationPolicy.instagramDestinationReached(task, currentInstagramSurface())) {
+                completeDirectedNavigation(SupportedApp.INSTAGRAM)
+                return@postDirectedNavigationStep
+            }
+            if (task == TunnelTask.INSTAGRAM_POST) {
+                retryInstagramCreateFromMainShell()
+                return@postDirectedNavigationStep
+            }
+            if (navigateToTaskDestination(task)) {
+                verifyInstagramDestinationAfterSettle(task, allowMainFeedRecovery = false)
+            } else {
+                failInstagramDirectedNavigation()
+            }
+        }
+    }
+
+    private fun currentInstagramSurface(): InstagramSurface? = latestInstagramSurfaceForRouting
 
     private fun failInstagramDirectedNavigation() {
         completeDirectedNavigation(SupportedApp.INSTAGRAM)
@@ -2589,58 +2654,6 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         textLabels = setOf("Profile"),
     )
 
-    private fun isInstagramCreateFlowVisible(): Boolean {
-        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
-        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
-        if (rootPackage != InstagramSurfaceDetector.INSTAGRAM_PACKAGE) {
-            recycleNode(root)
-            return false
-        }
-        val createFlowIds = setOf(
-            "gallery_picker_grid_item_container",
-            "gallery_picker_container",
-            "media_picker_container",
-            "creation_root",
-            "creation_main_container",
-        )
-        val createFlowLabels = setOf("New post", "Create new post")
-        val stack = ArrayDeque<AccessibilityNodeInfo>()
-        return try {
-            stack.addLast(root)
-            while (stack.isNotEmpty()) {
-                val node = stack.removeLast()
-                val ownsNode = node !== root
-                try {
-                    val visible = try { node.isVisibleToUser } catch (_: RuntimeException) { false }
-                    val resourceId = try { node.viewIdResourceName?.substringAfterLast('/') } catch (_: RuntimeException) { null }
-                    val label = try { node.text?.toString()?.trim() } catch (_: RuntimeException) { null }
-                    val description = try { node.contentDescription?.toString()?.trim() } catch (_: RuntimeException) { null }
-                    if (visible && (
-                            (resourceId != null && resourceId in createFlowIds) ||
-                                (label != null && label in createFlowLabels) ||
-                                (description != null && description in createFlowLabels)
-                            )) {
-                        while (stack.isNotEmpty()) {
-                            val pending = stack.removeLast()
-                            if (pending !== root) recycleNode(pending)
-                        }
-                        return true
-                    }
-                    for (index in node.childCount - 1 downTo 0) node.getChild(index)?.let(stack::addLast)
-                } finally {
-                    if (ownsNode) recycleNode(node)
-                }
-            }
-            false
-        } finally {
-            while (stack.isNotEmpty()) {
-                val pending = stack.removeLast()
-                if (pending !== root) recycleNode(pending)
-            }
-            recycleNode(root)
-        }
-    }
-
     private fun openInstagramMainFeed(): Boolean = runCatching {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.instagram.com/_n/mainfeed/")).apply {
             setPackage(InstagramSurfaceDetector.INSTAGRAM_PACKAGE)
@@ -2652,31 +2665,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun navigateToYouTubeDestination(task: TunnelTask) {
         youTubeDirectedNavigationInProgress = true
+        captureCurrentRoot()
 
-        // Subscriptions needs stronger destination semantics than the other YouTube tabs.
-        // YouTube keeps the source bottom tab selected while a nested Search/Video screen is
-        // open, so clicking an already-selected Subscriptions tab can return ACTION_CLICK=true
-        // without leaving the video at all. Only consider this route complete once the detector
-        // confirms that the actual Subscriptions feed is visible.
         if (task == TunnelTask.YOUTUBE_SUBSCRIPTIONS) {
-            // YouTube keeps the originating bottom tab selected under nested watch/search screens.
-            // Do not infer a route from that selected tab. Prefer YouTube's own exported
-            // "open subscriptions" destination, which asks the app to open the feed root directly.
+            // Android accepting the intent is not proof that this YouTube build opened the feed.
+            // Verify the semantic root before ending directed navigation.
             if (openYouTubeSubscriptionsDestination()) {
                 youTubeSearchContextActive = false
                 postDirectedNavigationStep(SupportedApp.YOUTUBE, YOUTUBE_SUBSCRIPTIONS_DESTINATION_SETTLE_MS) {
-                    // startActivity() only proves Android accepted the intent; it does not prove
-                    // this YouTube build actually landed on the Subscriptions feed. Verify the
-                    // semantic destination before releasing directed-navigation arbitration. If
-                    // the shortcut was ignored, redirected, or left a nested layer on top, fall
-                    // back to the bounded in-app recovery path instead of silently accepting it.
                     captureCurrentRoot()
-                    val surface = AccessibilityRuntime.state.value.currentYouTubeDetection
-                        ?.detection
-                        ?.surface
-                    if (surface == YouTubeSurface.YOUTUBE_SUBSCRIPTIONS &&
-                        !hasYouTubeBackNavigationChrome()
-                    ) {
+                    if (currentYouTubeDestinationReached(task)) {
+
                         completeDirectedNavigation(SupportedApp.YOUTUBE)
                     } else {
                         navigateToYouTubeSubscriptionsRoot(DIRECTED_TAB_MAX_BACK_STEPS)
@@ -2688,19 +2687,15 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             return
         }
 
-        if (navigateToTaskDestination(task)) {
+        if (currentYouTubeDestinationReached(task)) {
             finishYouTubeDirectedNavigationAfterSettle()
             return
         }
-
-        // Never blindly press Back from YouTube's top-level shell. If a tab affordance is not
-        // exposed there, GLOBAL_ACTION_BACK can background/close YouTube. Only unwind surfaces
-        // that the detector positively identifies as nested navigation.
-        if (currentYouTubeSurfaceAllowsBackNavigation()) {
-            backTowardYouTubeMainShell(task, DIRECTED_TAB_MAX_BACK_STEPS)
-        } else {
-            failYouTubeDirectedNavigation()
-        }
+        attemptYouTubeDestination(
+            task = task,
+            backStepsRemaining = DIRECTED_TAB_MAX_BACK_STEPS,
+            allowHomeReset = true,
+        )
     }
 
     private fun openYouTubeSubscriptionsDestination(): Boolean {
@@ -2722,29 +2717,111 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         return runCatching { startActivity(feedIntent); true }.getOrDefault(false)
     }
 
+    private fun openYouTubeHomeDestination(): Boolean = runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(YOUTUBE_HOME_URI)).apply {
+            setPackage(YouTubeSurfaceDetector.YOUTUBE_PACKAGE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+        true
+    }.getOrDefault(false)
+
+    private fun currentYouTubeSurface(): YouTubeSurface? =
+        AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface
+
+    private fun currentYouTubeDestinationReached(task: TunnelTask): Boolean =
+        DirectedNavigationPolicy.youtubeDestinationReached(
+            task = task,
+            surface = currentYouTubeSurface(),
+            hasBackNavigationChrome = if (task == TunnelTask.YOUTUBE_SUBSCRIPTIONS) {
+                hasYouTubeBackNavigationChrome()
+            } else {
+                false
+            },
+        )
+
+    private fun attemptYouTubeDestination(
+        task: TunnelTask,
+        backStepsRemaining: Int,
+        allowHomeReset: Boolean,
+    ) {
+        captureCurrentRoot()
+        if (currentYouTubeDestinationReached(task)) {
+            completeDirectedNavigation(SupportedApp.YOUTUBE)
+            return
+        }
+        if (navigateToTaskDestination(task)) {
+            verifyYouTubeDestinationAfterSettle(task, backStepsRemaining, allowHomeReset)
+        } else {
+            recoverYouTubeDestination(task, backStepsRemaining, allowHomeReset)
+        }
+    }
+
+    private fun verifyYouTubeDestinationAfterSettle(
+        task: TunnelTask,
+        backStepsRemaining: Int,
+        allowHomeReset: Boolean,
+    ) {
+        postDirectedNavigationStep(SupportedApp.YOUTUBE, DIRECTED_DESTINATION_VERIFY_SETTLE_MS) {
+            captureCurrentRoot()
+            if (currentYouTubeDestinationReached(task)) {
+                completeDirectedNavigation(SupportedApp.YOUTUBE)
+            } else {
+                recoverYouTubeDestination(task, backStepsRemaining, allowHomeReset)
+            }
+        }
+    }
+
+    private fun recoverYouTubeDestination(
+        task: TunnelTask,
+        backStepsRemaining: Int,
+        allowHomeReset: Boolean,
+    ) {
+        captureCurrentRoot()
+        val surface = currentYouTubeSurface()
+        if (DirectedNavigationPolicy.youtubeMayUnwindWithBack(surface) &&
+            backStepsRemaining > 0 &&
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        ) {
+            postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
+                attemptYouTubeDestination(task, backStepsRemaining - 1, allowHomeReset)
+            }
+            return
+        }
+
+        // Never keep pressing Back from Home/Shorts/You/other top-level content. Prefer the
+        // visible Home tab when YouTube exposes it; if chrome is hidden, use YouTube's own Home
+        // destination URI. Either way, retry the requested destination only once from that reset.
+        if (allowHomeReset && clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_HOME)) {
+            youTubeSearchContextActive = false
+            postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
+                attemptYouTubeDestination(task, backStepsRemaining = 0, allowHomeReset = false)
+            }
+            return
+        }
+        if (allowHomeReset && openYouTubeHomeDestination()) {
+            youTubeSearchContextActive = false
+            postDirectedNavigationStep(SupportedApp.YOUTUBE, YOUTUBE_HOME_DESTINATION_SETTLE_MS) {
+                attemptYouTubeDestination(task, backStepsRemaining = 0, allowHomeReset = false)
+            }
+            return
+        }
+        failYouTubeDirectedNavigation()
+    }
+
     private fun navigateToYouTubeSubscriptionsRoot(backStepsRemaining: Int) {
         // Refresh first: the cached detection may still describe the surface that was visible
         // before the Purpose Gate / notification action was dismissed. captureCurrentRoot() is
         // safe here because directed navigation suppresses coordinator policy while still
         // updating currentYouTubeDetection.
         captureCurrentRoot()
-        when (AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface) {
-            YouTubeSurface.YOUTUBE_SUBSCRIPTIONS -> {
-                // A watch/search layer can still be on top while Subscriptions remains selected.
-                // Only accept this as the feed root when there is no nested Back/up chrome.
-                if (!hasYouTubeBackNavigationChrome()) {
-                    finishYouTubeDirectedNavigationAfterSettle()
-                    return
-                }
-                if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
-                    failYouTubeDirectedNavigation()
-                    return
-                }
-                postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
-                    navigateToYouTubeSubscriptionsRoot(backStepsRemaining - 1)
-                }
-                return
-            }
+        if (currentYouTubeDestinationReached(TunnelTask.YOUTUBE_SUBSCRIPTIONS)) {
+            completeDirectedNavigation(SupportedApp.YOUTUBE)
+            return
+        }
+
+        when (currentYouTubeSurface()) {
+            YouTubeSurface.YOUTUBE_SUBSCRIPTIONS,
             YouTubeSurface.YOUTUBE_SEARCH,
             YouTubeSurface.YOUTUBE_VIDEO,
             -> {
@@ -2766,40 +2843,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             failYouTubeDirectedNavigation()
             return
         }
-        postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
+        postDirectedNavigationStep(SupportedApp.YOUTUBE, DIRECTED_DESTINATION_VERIFY_SETTLE_MS) {
             captureCurrentRoot()
-            when (AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface) {
-                YouTubeSurface.YOUTUBE_SUBSCRIPTIONS -> finishYouTubeDirectedNavigationAfterSettle()
-                YouTubeSurface.YOUTUBE_SEARCH,
-                YouTubeSurface.YOUTUBE_VIDEO,
-                -> navigateToYouTubeSubscriptionsRoot(backStepsRemaining)
-                else -> failYouTubeDirectedNavigation()
-            }
-        }
-    }
-
-    private fun currentYouTubeSurfaceAllowsBackNavigation(): Boolean =
-        when (AccessibilityRuntime.state.value.currentYouTubeDetection?.detection?.surface) {
-            YouTubeSurface.YOUTUBE_SEARCH,
-            YouTubeSurface.YOUTUBE_VIDEO,
-            -> true
-            else -> false
-        }
-
-    private fun backTowardYouTubeMainShell(task: TunnelTask, backStepsRemaining: Int) {
-        if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
-            failYouTubeDirectedNavigation()
-            return
-        }
-        postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
-            if (navigateToTaskDestination(task)) {
-                finishYouTubeDirectedNavigationAfterSettle()
-            } else if (hasYouTubeTopLevelChrome()) {
-                // We have already reached YouTube's main shell. Do not issue another Back merely
-                // because the requested tab is not clickable in this app build.
-                failYouTubeDirectedNavigation()
+            if (currentYouTubeDestinationReached(TunnelTask.YOUTUBE_SUBSCRIPTIONS)) {
+                completeDirectedNavigation(SupportedApp.YOUTUBE)
+            } else if (DirectedNavigationPolicy.youtubeMayUnwindWithBack(currentYouTubeSurface())) {
+                navigateToYouTubeSubscriptionsRoot(backStepsRemaining)
             } else {
-                backTowardYouTubeMainShell(task, backStepsRemaining - 1)
+                failYouTubeDirectedNavigation()
             }
         }
     }
@@ -2842,14 +2893,70 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun hasYouTubeTopLevelChrome(): Boolean {
+    private fun finishYouTubeDirectedNavigationAfterSettle() {
+        postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
+            completeDirectedNavigation(SupportedApp.YOUTUBE)
+        }
+    }
+
+    private fun failYouTubeDirectedNavigation() {
+        completeDirectedNavigation(SupportedApp.YOUTUBE)
+    }
+
+    private fun clickYouTubeSearchAffordance(): Boolean {
+        // YouTube watch/comments screens can expose unrelated Search actions. Only use the
+        // upper app-chrome region for the global Search jump; if it is hidden, recovery first
+        // returns to YouTube Home instead of clicking an arbitrary in-content Search control.
+        val clicked = clickYouTubeLabeledAffordanceInVerticalBand(
+            wantedLabel = "Search",
+            minCenterFraction = 0.0,
+            maxCenterFraction = YOUTUBE_TOP_CHROME_MAX_CENTER_FRACTION,
+        )
+        if (clicked) youTubeSearchContextActive = true
+        return clicked
+    }
+
+    private fun clickYouTubeSubscriptionsAffordance(): Boolean =
+        clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_SUBSCRIPTIONS)
+
+    private fun clickYouTubeShortsAffordance(): Boolean =
+        clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_SHORTS)
+
+    private fun clickYouTubeChromeAffordance(role: UiChromeRole): Boolean {
+        if (role == UiChromeRole.YOUTUBE_BACK) return false
+        if (clickYouTubeExactChromeRole(role)) return true
+        val wantedLabel = when (role) {
+            UiChromeRole.YOUTUBE_HOME -> "Home"
+            UiChromeRole.YOUTUBE_SHORTS -> "Shorts"
+            UiChromeRole.YOUTUBE_SUBSCRIPTIONS -> "Subscriptions"
+            UiChromeRole.YOUTUBE_YOU -> "You"
+            UiChromeRole.YOUTUBE_BACK -> return false
+        }
+        // Some builds don't expose bottom tabs as Button nodes, so the fixed chrome-role
+        // sanitizer cannot identify them. Fall back to the exact label only inside the bottom
+        // navigation band; this prevents a content shelf titled "Shorts" or "Subscriptions"
+        // from stealing the directed jump.
+        return clickYouTubeLabeledAffordanceInVerticalBand(
+            wantedLabel = wantedLabel,
+            minCenterFraction = YOUTUBE_BOTTOM_CHROME_MIN_CENTER_FRACTION,
+            maxCenterFraction = 1.0,
+        )
+    }
+
+    private fun clickYouTubeExactChromeRole(role: UiChromeRole): Boolean {
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
         val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
         if (rootPackage != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
             recycleNode(root)
             return false
         }
-        val knownLabels = setOf("Home", "Shorts", "Subscriptions", "You")
+        val rootBounds = Rect().also { bounds ->
+            try { root.getBoundsInScreen(bounds) } catch (_: RuntimeException) { bounds.setEmpty() }
+        }
+        if (rootBounds.height() <= 0) {
+            recycleNode(root)
+            return false
+        }
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         return try {
             stack.addLast(root)
@@ -2857,12 +2964,23 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                 val node = stack.removeLast()
                 val ownsNode = node !== root
                 try {
-                    val visible = try { node.isVisibleToUser } catch (_: RuntimeException) { false }
-                    val labels = buildList {
-                        try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
-                        try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
+                    val bounds = Rect()
+                    val inBottomChrome = try {
+                        node.getBoundsInScreen(bounds)
+                        if (bounds.isEmpty) {
+                            false
+                        } else {
+                            val centerFraction =
+                                ((bounds.exactCenterY() - rootBounds.top.toFloat()) / rootBounds.height().toFloat()).toDouble()
+                            centerFraction >= YOUTUBE_BOTTOM_CHROME_MIN_CENTER_FRACTION
+                        }
+                    } catch (_: RuntimeException) {
+                        false
                     }
-                    if (visible && labels.any { label -> knownLabels.any { label == it || label.startsWith("$it,") } }) {
+                    if (inBottomChrome &&
+                        inferWhitelistedChromeRole(YouTubeSurfaceDetector.YOUTUBE_PACKAGE, node) == role &&
+                        performClickOnNodeOrParent(node)
+                    ) {
                         while (stack.isNotEmpty()) {
                             val pending = stack.removeLast()
                             if (pending !== root) recycleNode(pending)
@@ -2884,52 +3002,26 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun finishYouTubeDirectedNavigationAfterSettle() {
-        postDirectedNavigationStep(SupportedApp.YOUTUBE, DESTINATION_NAVIGATION_SETTLE_MS) {
-            completeDirectedNavigation(SupportedApp.YOUTUBE)
-        }
-    }
-
-    private fun failYouTubeDirectedNavigation() {
-        completeDirectedNavigation(SupportedApp.YOUTUBE)
-    }
-
-    private fun clickYouTubeSearchAffordance(): Boolean {
-        val clicked = clickAppAffordance(
-            packageName = YouTubeSurfaceDetector.YOUTUBE_PACKAGE,
-            contentDescriptions = setOf("Search"),
-            textLabels = setOf("Search"),
-        )
-        if (clicked) youTubeSearchContextActive = true
-        return clicked
-    }
-
-    private fun clickYouTubeSubscriptionsAffordance(): Boolean =
-        clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_SUBSCRIPTIONS)
-
-    private fun clickYouTubeShortsAffordance(): Boolean =
-        clickYouTubeChromeAffordance(UiChromeRole.YOUTUBE_SHORTS)
-
-    private fun clickYouTubeChromeAffordance(role: UiChromeRole): Boolean {
+    private fun clickYouTubeLabeledAffordanceInVerticalBand(
+        wantedLabel: String,
+        minCenterFraction: Double,
+        maxCenterFraction: Double,
+    ): Boolean {
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
         val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
         if (rootPackage != YouTubeSurfaceDetector.YOUTUBE_PACKAGE) {
             recycleNode(root)
             return false
         }
-        val wantedLabel = when (role) {
-            UiChromeRole.YOUTUBE_HOME -> "Home"
-            UiChromeRole.YOUTUBE_SHORTS -> "Shorts"
-            UiChromeRole.YOUTUBE_SUBSCRIPTIONS -> "Subscriptions"
-            UiChromeRole.YOUTUBE_YOU -> "You"
-            UiChromeRole.YOUTUBE_BACK -> return false
+        val rootBounds = Rect().also { bounds ->
+            try { root.getBoundsInScreen(bounds) } catch (_: RuntimeException) { bounds.setEmpty() }
+        }
+        if (rootBounds.height() <= 0) {
+            recycleNode(root)
+            return false
         }
         val stack = ArrayDeque<AccessibilityNodeInfo>()
-        try {
-            // YouTube's bottom navigation is not guaranteed to expose each tab as a Button class.
-            // Route using the exact, whitelisted chrome label and click its clickable ancestor.
-            // Prefix-with-comma handles descriptions such as "Subscriptions, new activity" while
-            // still avoiding arbitrary content labels.
+        return try {
             stack.addLast(root)
             while (stack.isNotEmpty()) {
                 val node = stack.removeLast()
@@ -2940,8 +3032,21 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                         try { node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
                         try { node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::add) } catch (_: RuntimeException) { }
                     }
-                    val matchesRole = labels.any { it == wantedLabel || it.startsWith("$wantedLabel,") }
-                    if (usable && matchesRole && performClickOnNodeOrParent(node)) {
+                    val matchesLabel = labels.any { it == wantedLabel || it.startsWith("$wantedLabel,") }
+                    val bounds = Rect()
+                    val inBand = try {
+                        node.getBoundsInScreen(bounds)
+                        if (bounds.isEmpty) {
+                            false
+                        } else {
+                            val centerFraction =
+                                ((bounds.exactCenterY() - rootBounds.top.toFloat()) / rootBounds.height().toFloat()).toDouble()
+                            centerFraction >= minCenterFraction && centerFraction <= maxCenterFraction
+                        }
+                    } catch (_: RuntimeException) {
+                        false
+                    }
+                    if (usable && matchesLabel && inBand && performClickOnNodeOrParent(node)) {
                         while (stack.isNotEmpty()) {
                             val pending = stack.removeLast()
                             if (pending !== root) recycleNode(pending)
@@ -2953,7 +3058,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     if (ownsNode) recycleNode(node)
                 }
             }
-            return false
+            false
         } finally {
             while (stack.isNotEmpty()) {
                 val pending = stack.removeLast()
@@ -2965,38 +3070,67 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun navigateToTikTokSearch() {
         tikTokDirectedNavigationInProgress = true
-        val currentSurface = tunnelCoordinator.state.currentSurface
-        if (currentSurface == DetectedSurface.TIKTOK_SEARCH) {
-            finishTikTokDirectedNavigationAfterSettle()
-            return
-        }
-        if (currentSurface == DetectedSurface.TIKTOK_FEED && clickTikTokSearchAffordance()) {
-            finishTikTokDirectedNavigationAfterSettle()
-            return
-        }
-
-        // TikTok 47.x can expose unrelated Search controls inside Inbox/Profile. Avoid
-        // clicking those. Route through the stable For You tab (`omq`) first, then click
-        // the global Search affordance once that screen has settled.
-        val routedToFeed = clickAppAffordance(
-            packageName = TikTokSurfaceDetector.TIKTOK_PACKAGE,
-            resourceIds = listOf("omq"),
-            contentDescriptions = setOf("For You", "Home"),
-            textLabels = setOf("For You", "Home"),
+        routeTikTokSearch(
+            backStepsRemaining = TIKTOK_SEARCH_MAX_BACK_STEPS,
+            searchAttemptsRemaining = TIKTOK_SEARCH_MAX_CLICK_ATTEMPTS,
         )
-        if (!routedToFeed) {
-            invalidateDirectedNavigation()
-            tunnelCoordinator.reevaluateCurrentSurface(System.currentTimeMillis())
-            updateTunnelUi()
-            scheduleCapture(DESTINATION_NAVIGATION_SETTLE_MS)
+    }
+
+    private fun routeTikTokSearch(
+        backStepsRemaining: Int,
+        searchAttemptsRemaining: Int,
+    ) {
+        captureCurrentRoot()
+        val surface = currentTikTokSurface()
+        if (DirectedNavigationPolicy.tikTokDestinationReached(TunnelTask.TIKTOK_SEARCH_WATCH, surface)) {
+            completeDirectedNavigation(SupportedApp.TIKTOK)
             return
         }
 
-        postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
-            if (clickTikTokSearchAffordance()) {
-                finishTikTokDirectedNavigationAfterSettle()
+        // Inbox/Profile expose their own search controls. Only touch Search from the global feed.
+        if (surface == TikTokSurface.TIKTOK_FEED) {
+            if (searchAttemptsRemaining <= 0 || !clickTikTokSearchAffordance()) {
+                failTikTokDirectedNavigation()
+                return
+            }
+            verifyTikTokSearchAfterSettle(backStepsRemaining, searchAttemptsRemaining - 1)
+            return
+        }
+
+        // Prefer TikTok's own stable For You tab over Back. A blind Back from a top-level shell can
+        // background the app, while a local Search control can send us to the wrong screen.
+        if (clickTikTokFeedAffordance()) {
+            postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
+                routeTikTokSearch(backStepsRemaining, searchAttemptsRemaining)
+            }
+            return
+        }
+
+        val mainShellVisible = hasTikTokMainShellNavigation()
+        if (DirectedNavigationPolicy.tikTokMayUnwindWithBack(surface, mainShellVisible) &&
+            backStepsRemaining > 0 &&
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        ) {
+            postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
+                routeTikTokSearch(backStepsRemaining - 1, searchAttemptsRemaining)
+            }
+            return
+        }
+
+        failTikTokDirectedNavigation()
+    }
+
+    private fun verifyTikTokSearchAfterSettle(
+        backStepsRemaining: Int,
+        searchAttemptsRemaining: Int,
+    ) {
+        postDirectedNavigationStep(SupportedApp.TIKTOK, DIRECTED_DESTINATION_VERIFY_SETTLE_MS) {
+            captureCurrentRoot()
+            if (DirectedNavigationPolicy.tikTokDestinationReached(TunnelTask.TIKTOK_SEARCH_WATCH, currentTikTokSurface())) {
+                completeDirectedNavigation(SupportedApp.TIKTOK)
+            } else if (searchAttemptsRemaining > 0) {
+                routeTikTokSearch(backStepsRemaining, searchAttemptsRemaining)
             } else {
-                // Fail visibly on the settled surface instead of pretending navigation worked.
                 failTikTokDirectedNavigation()
             }
         }
@@ -3009,83 +3143,63 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         textLabels = setOf("Search"),
     )
 
+    private fun clickTikTokFeedAffordance(): Boolean = clickAppAffordance(
+        packageName = TikTokSurfaceDetector.TIKTOK_PACKAGE,
+        resourceIds = listOf("omq"),
+        contentDescriptions = setOf("For You", "Home"),
+        textLabels = setOf("For You", "Home"),
+    )
+
     private fun navigateToTikTokInbox() {
         tikTokDirectedNavigationInProgress = true
-        if (isTikTokInboxSelected()) {
-            finishTikTokDirectedNavigationAfterSettle()
-            return
-        }
-        if (clickTikTokInboxAffordance()) {
-            postDirectedNavigationStep(SupportedApp.TIKTOK, DESTINATION_NAVIGATION_SETTLE_MS) {
-                verifyTikTokInboxOrBack(TIKTOK_INBOX_MAX_BACK_STEPS)
-            }
-            return
-        }
-
-        // A visible TikTok main navigation means we are already at an in-app shell. Global Back
-        // from Feed/Friends/Profile can background TikTok entirely when an app update changes the
-        // Inbox affordance. Stay in-app: route through For You once and retry from the settled
-        // shell. Only nested screens without the main navigation use bounded Back recovery.
-        if (isTikTokMainNavigationVisible()) {
-            retryTikTokInboxFromMainShell()
-            return
-        }
-        backTowardTikTokMainShell(TIKTOK_INBOX_MAX_BACK_STEPS)
-    }
-
-    private fun retryTikTokInboxFromMainShell() {
-        val routedToFeed = clickAppAffordance(
-            packageName = TikTokSurfaceDetector.TIKTOK_PACKAGE,
-            resourceIds = listOf("omq"),
-            contentDescriptions = setOf("For You", "Home"),
-            textLabels = setOf("For You", "Home"),
+        routeTikTokInbox(
+            backStepsRemaining = TIKTOK_INBOX_MAX_BACK_STEPS,
+            clickAttemptsRemaining = TIKTOK_INBOX_MAX_CLICK_ATTEMPTS,
         )
-        if (!routedToFeed) {
-            failTikTokDirectedNavigation()
+    }
+
+    private fun routeTikTokInbox(
+        backStepsRemaining: Int,
+        clickAttemptsRemaining: Int,
+    ) {
+        captureCurrentRoot()
+        val surface = currentTikTokSurface()
+        if (DirectedNavigationPolicy.tikTokDestinationReached(TunnelTask.TIKTOK_INBOX, surface)) {
+            completeDirectedNavigation(SupportedApp.TIKTOK)
             return
         }
-        postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
-            if (isTikTokInboxSelected()) {
-                finishTikTokDirectedNavigationAfterSettle()
-            } else if (clickTikTokInboxAffordance()) {
-                postDirectedNavigationStep(SupportedApp.TIKTOK, DESTINATION_NAVIGATION_SETTLE_MS) {
-                    if (isTikTokInboxSelected()) finishTikTokDirectedNavigationAfterSettle()
-                    else failTikTokDirectedNavigation()
-                }
-            } else {
-                failTikTokDirectedNavigation()
+
+        if (clickAttemptsRemaining > 0 && clickTikTokInboxAffordance()) {
+            verifyTikTokInboxAfterSettle(backStepsRemaining, clickAttemptsRemaining - 1)
+            return
+        }
+
+        val mainShellVisible = hasTikTokMainShellNavigation()
+        if (DirectedNavigationPolicy.tikTokMayUnwindWithBack(surface, mainShellVisible) &&
+            backStepsRemaining > 0 &&
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        ) {
+            postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
+                routeTikTokInbox(backStepsRemaining - 1, clickAttemptsRemaining)
             }
-        }
-    }
-
-    private fun verifyTikTokInboxOrBack(backStepsRemaining: Int) {
-        if (isTikTokInboxSelected()) {
-            finishTikTokDirectedNavigationAfterSettle()
-        } else if (isTikTokMainNavigationVisible()) {
-            // We reached a stable TikTok shell but the requested tab did not select. Failing open
-            // is safer than issuing another global Back that could leave the app.
-            failTikTokDirectedNavigation()
-        } else {
-            backTowardTikTokMainShell(backStepsRemaining)
-        }
-    }
-
-    private fun backTowardTikTokMainShell(backStepsRemaining: Int) {
-        if (backStepsRemaining <= 0 || !performGlobalAction(GLOBAL_ACTION_BACK)) {
-            failTikTokDirectedNavigation()
             return
         }
-        postDirectedNavigationStep(SupportedApp.TIKTOK, TIKTOK_ROUTE_STEP_SETTLE_MS) {
-            if (isTikTokInboxSelected()) {
-                finishTikTokDirectedNavigationAfterSettle()
-            } else if (clickTikTokInboxAffordance()) {
-                postDirectedNavigationStep(SupportedApp.TIKTOK, DESTINATION_NAVIGATION_SETTLE_MS) {
-                    verifyTikTokInboxOrBack(backStepsRemaining - 1)
-                }
-            } else if (isTikTokMainNavigationVisible()) {
-                failTikTokDirectedNavigation()
+
+        // If main navigation is visible, another Back would leave TikTok. Fail on the settled
+        // in-app surface instead of turning a broken return jump into an app exit.
+        failTikTokDirectedNavigation()
+    }
+
+    private fun verifyTikTokInboxAfterSettle(
+        backStepsRemaining: Int,
+        clickAttemptsRemaining: Int,
+    ) {
+        postDirectedNavigationStep(SupportedApp.TIKTOK, DIRECTED_DESTINATION_VERIFY_SETTLE_MS) {
+            captureCurrentRoot()
+            if (DirectedNavigationPolicy.tikTokDestinationReached(TunnelTask.TIKTOK_INBOX, currentTikTokSurface())) {
+                completeDirectedNavigation(SupportedApp.TIKTOK)
             } else {
-                backTowardTikTokMainShell(backStepsRemaining - 1)
+                routeTikTokInbox(backStepsRemaining, clickAttemptsRemaining)
             }
         }
     }
@@ -3096,7 +3210,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         contentDescriptions = setOf("Inbox"),
     )
 
-    private fun isTikTokMainNavigationVisible(): Boolean {
+    private fun currentTikTokSurface(): TikTokSurface? = latestTikTokSurfaceForRouting
+
+    private fun hasTikTokMainShellNavigation(): Boolean {
         val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
         val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
         if (rootPackage != TikTokSurfaceDetector.TIKTOK_PACKAGE) {
@@ -3121,39 +3237,8 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun isTikTokInboxSelected(): Boolean {
-        val root = try { rootInActiveWindow } catch (_: RuntimeException) { null } ?: return false
-        val rootPackage = try { root.packageName?.toString() } catch (_: RuntimeException) { null }
-        if (rootPackage != TikTokSurfaceDetector.TIKTOK_PACKAGE) {
-            recycleNode(root)
-            return false
-        }
-        return try {
-            val matches = try {
-                root.findAccessibilityNodeInfosByViewId("${TikTokSurfaceDetector.TIKTOK_PACKAGE}:id/omr")
-            } catch (_: RuntimeException) {
-                emptyList()
-            }
-            try {
-                matches.any { node ->
-                    try { node.isVisibleToUser && node.isSelected } catch (_: RuntimeException) { false }
-                }
-            } finally {
-                matches.forEach(::recycleNode)
-            }
-        } finally {
-            recycleNode(root)
-        }
-    }
-
     private fun failTikTokDirectedNavigation() {
         completeDirectedNavigation(SupportedApp.TIKTOK)
-    }
-
-    private fun finishTikTokDirectedNavigationAfterSettle() {
-        postDirectedNavigationStep(SupportedApp.TIKTOK, DESTINATION_NAVIGATION_SETTLE_MS) {
-            completeDirectedNavigation(SupportedApp.TIKTOK)
-        }
     }
 
     private fun navigateToTaskDestination(task: TunnelTask): Boolean = when (task) {
@@ -3907,6 +3992,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             "com.google.android.youtube.action.open.subscriptions"
         private const val YOUTUBE_SUBSCRIPTIONS_FEED_URI =
             "https://www.youtube.com/feed/subscriptions"
+        private const val YOUTUBE_HOME_URI = "https://www.youtube.com/"
         private const val MAX_NODES = 200
         private const val MAX_DEPTH = 12
         private const val MAX_HISTORY = 8
@@ -3923,10 +4009,17 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         private const val PROTECTION_RESUME_MAX_ATTEMPTS = 8
         private const val OVERLAY_DISMISS_SETTLE_MS = 120L
         private const val DESTINATION_NAVIGATION_SETTLE_MS = 350L
+        private const val DIRECTED_DESTINATION_VERIFY_SETTLE_MS = 550L
         private const val INSTAGRAM_MAIN_FEED_SETTLE_MS = 550L
         private const val YOUTUBE_SUBSCRIPTIONS_DESTINATION_SETTLE_MS = 700L
+        private const val YOUTUBE_HOME_DESTINATION_SETTLE_MS = 700L
+        private const val YOUTUBE_TOP_CHROME_MAX_CENTER_FRACTION = 0.40
+        private const val YOUTUBE_BOTTOM_CHROME_MIN_CENTER_FRACTION = 0.60
         private const val TIKTOK_ROUTE_STEP_SETTLE_MS = 500L
         private const val TIKTOK_INBOX_MAX_BACK_STEPS = 2
+        private const val TIKTOK_INBOX_MAX_CLICK_ATTEMPTS = 2
+        private const val TIKTOK_SEARCH_MAX_BACK_STEPS = 2
+        private const val TIKTOK_SEARCH_MAX_CLICK_ATTEMPTS = 2
         private const val DIRECTED_TAB_MAX_BACK_STEPS = 2
         private const val TIKTOK_CLICK_SETTLE_MS = 250L
         private const val NOTIFICATION_ACTION_RETRY_MS = 120L
