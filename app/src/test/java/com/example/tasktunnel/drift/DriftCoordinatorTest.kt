@@ -83,6 +83,29 @@ class DriftCoordinatorTest {
     }
 
     @Test
+    fun appPackageCanBeIgnoredWithoutBreakingForegroundOwnership() {
+        val appPackage = "com.rubin.tasktunnel"
+        val drift = DriftCoordinator(
+            selectedPackages = SELECTED.toSet(),
+            policy = DriftPolicy(
+                distinctAppThreshold = 3,
+                rollingWindowMillis = 60,
+                quietResetMillis = 60,
+            ),
+            idFactory = { "episode-1" },
+            ignoredPackages = DriftDetector.DEFAULT_IGNORED_PACKAGES + appPackage,
+        )
+
+        drift.observeForeground(INSTAGRAM, 0)
+        drift.observeForeground(appPackage, 5)
+        drift.observeForeground(YOUTUBE, 10)
+        drift.observeForeground(REDDIT, 20)
+
+        assertEquals(REDDIT, drift.foregroundPackage)
+        assertEquals(listOf(INSTAGRAM, YOUTUBE, REDDIT), drift.checkInCandidate(false)?.involvedPackages)
+    }
+
+    @Test
     fun foregroundObservationsAreNotClearedByTunnelLifecycle() {
         val drift = coordinator()
 

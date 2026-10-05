@@ -40,11 +40,21 @@ class TunnelNotificationController(private val context: Context) {
     private var cachedIconPackage: String? = null
     private var cachedIconDensityDpi: Int? = null
     private var cachedAppIcon: Bitmap? = null
+    private var channelEnsured = false
+    private var idleNotificationCleared = false
+    private var lastPostingAllowed: Boolean? = null
 
     fun ensureChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (channelEnsured) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            channelEnsured = true
+            return
+        }
         val systemManager = context.getSystemService(NotificationManager::class.java)
-        if (systemManager.getNotificationChannel(CHANNEL_ID) != null) return
+        if (systemManager.getNotificationChannel(CHANNEL_ID) != null) {
+            channelEnsured = true
+            return
+        }
         systemManager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
@@ -57,6 +67,7 @@ class TunnelNotificationController(private val context: Context) {
                 setShowBadge(false)
             },
         )
+        channelEnsured = true
     }
 
     fun sync(state: TunnelRuntimeState, nowMillis: Long = System.currentTimeMillis()) {
@@ -65,14 +76,27 @@ class TunnelNotificationController(private val context: Context) {
         if (session == null) {
             clearDismissedSession()
             lastRenderKey = null
-            manager.cancel(NOTIFICATION_ID)
+            if (!idleNotificationCleared) {
+                // One cancel on startup clears a notification orphaned by process death. After
+                // that, an idle service should not keep crossing Binder just to cancel nothing.
+                manager.cancel(NOTIFICATION_ID)
+                idleNotificationCleared = true
+            }
             return
         }
+        idleNotificationCleared = false
         if (preferences.getString(KEY_DISMISSED_SESSION, null) == session.id) {
             manager.cancel(NOTIFICATION_ID)
             return
         }
-        if (!canPostNotifications()) {
+
+        val renderKey = renderKey(state, nowMillis)
+        // Surface captures can arrive several times per second. If the notification's semantic
+        // state/progress bucket has not changed, avoid repeated NotificationManager/channel IPC.
+        if (renderKey == lastRenderKey) return
+        val postingAllowed = canPostNotifications()
+        lastPostingAllowed = postingAllowed
+        if (!postingAllowed) {
             // If posting is disabled, do not retain a successful render key. Otherwise an
             // open-ended tunnel can stay notification-less after the user re-enables this app or
             // channel because its state may still have the exact same render key.
@@ -80,8 +104,6 @@ class TunnelNotificationController(private val context: Context) {
             return
         }
 
-        val renderKey = renderKey(state, nowMillis)
-        if (renderKey == lastRenderKey) return
         val notification = buildNotification(state, nowMillis)
         if (runCatching { manager.notify(NOTIFICATION_ID, notification) }.isSuccess) {
             lastRenderKey = renderKey
@@ -94,10 +116,16 @@ class TunnelNotificationController(private val context: Context) {
         return session.status == TunnelStatus.ACTIVE &&
             session.expiresAtMillis != null &&
             preferences.getString(KEY_DISMISSED_SESSION, null) != session.id &&
-            canPostNotifications()
+            lastPostingAllowed != false
+    }
+
+    fun invalidateRenderState() {
+        lastRenderKey = null
+        lastPostingAllowed = null
     }
 
     fun suppressForSession(sessionId: String) {
+        idleNotificationCleared = false
         preferences.edit().putString(KEY_DISMISSED_SESSION, sessionId).apply()
         lastRenderKey = null
         manager.cancel(NOTIFICATION_ID)
@@ -105,7 +133,9 @@ class TunnelNotificationController(private val context: Context) {
 
     fun cancel() {
         lastRenderKey = null
+        lastPostingAllowed = null
         manager.cancel(NOTIFICATION_ID)
+        idleNotificationCleared = true
     }
 
     private fun clearDismissedSession() {
@@ -407,7 +437,9 @@ class TunnelNotificationController(private val context: Context) {
         const val ACTION_END = "com.example.tasktunnel.notification.END"
         const val ACTION_DISMISSED = "com.example.tasktunnel.notification.DISMISSED"
         const val EXTRA_SESSION_ID = "session_id"
-        const val PROGRESS_REFRESH_MILLIS = 2_000L
+        // RemoteViews chronometers count down in SystemUI without app wakeups. The app only
+        // refreshes the decorative progress bar occasionally instead of rebuilding/notifying every 2s.
+        const val PROGRESS_REFRESH_MILLIS = 30_000L
         private const val PROGRESS_MAX = 1000
         private const val APP_ICON_DP = 48
         private const val NOTIFICATION_ID = 4107

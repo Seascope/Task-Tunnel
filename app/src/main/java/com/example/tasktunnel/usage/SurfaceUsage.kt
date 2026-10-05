@@ -8,7 +8,6 @@ import com.example.tasktunnel.attention.SurfaceUsageSegmentDao
 import com.example.tasktunnel.tunnel.DetectedSurface
 import com.example.tasktunnel.tunnel.TunnelTask
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -96,6 +95,7 @@ class SurfaceUsageTracker(
     @Volatile private var historyGeneration = 0L
     private var interactive = true
     private var overlayVisible = false
+    private var lastRetentionPruneAtMillis: Long? = null
 
     fun setInteractive(value: Boolean, nowMillis: Long) {
         interactive = value
@@ -171,14 +171,24 @@ class SurfaceUsageTracker(
     private fun finish(value: Active, endMillis: Long) {
         if (endMillis <= value.startedAt) return
         val generation = historyGeneration
-        scope.launch(Dispatchers.IO) {
+        val lastPrune = lastRetentionPruneAtMillis
+        val shouldPrune = lastPrune == null || endMillis < lastPrune ||
+            endMillis - lastPrune >= RETENTION_PRUNE_INTERVAL_MILLIS
+        if (shouldPrune) lastRetentionPruneAtMillis = endMillis
+        scope.launch {
             LocalHistoryWriteGate.runExclusive {
                 if (generation != historyGeneration) return@runExclusive
                 repository.record(SurfaceUsageSegment(0, value.app, value.surface, value.startedAt, endMillis, value.task, if (value.classified) SurfaceUsageClassification.CLASSIFIED else SurfaceUsageClassification.UNCLASSIFIED))
                 if (generation != historyGeneration) return@runExclusive
-                repository.deleteOlderThan(endMillis - SURFACE_USAGE_RETENTION_DAYS * 24L * 60 * 60 * 1_000)
+                if (shouldPrune) {
+                    repository.deleteOlderThan(endMillis - SURFACE_USAGE_RETENTION_DAYS * 24L * 60 * 60 * 1_000)
+                }
             }
         }
+    }
+
+    private companion object {
+        const val RETENTION_PRUNE_INTERVAL_MILLIS = 6L * 60 * 60 * 1_000
     }
 }
 

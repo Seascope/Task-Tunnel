@@ -12,6 +12,7 @@ data class KnownDriftApp(
 )
 
 object DriftAppCatalog {
+    private val labelCache = mutableMapOf<String, String>()
     /** Default starter set only. Drift itself is not limited to these packages. */
     val apps = listOf(
         KnownDriftApp("com.instagram.android", "Instagram"),
@@ -49,6 +50,7 @@ object DriftAppCatalog {
                     .takeUnless { it.isNullOrBlank() }
                     ?: apps.firstOrNull { it.packageName == packageName }?.displayName
                     ?: packageName.substringAfterLast('.')
+                synchronized(labelCache) { labelCache[packageName] = displayName }
                 KnownDriftApp(packageName, displayName)
             }
             .distinctBy(KnownDriftApp::packageName)
@@ -58,16 +60,19 @@ object DriftAppCatalog {
 
     fun labelFor(context: Context, packageName: String): String =
         apps.firstOrNull { it.packageName == packageName }?.displayName
-            ?: loadApplicationLabel(context, packageName)
+            ?: synchronized(labelCache) { labelCache[packageName] }
+            ?: loadApplicationLabel(context, packageName)?.also { label ->
+                synchronized(labelCache) { labelCache[packageName] = label }
+            }
             ?: packageName.substringAfterLast('.').ifBlank { packageName }
 
     fun defaultSelection(context: Context): Set<String> {
-        val installedDefaults = installedLaunchableApps(context)
-            .asSequence()
+        // The default set is only the four known apps. Avoid querying/labeling every launcher app
+        // just to learn whether these packages are installed.
+        return apps.asSequence()
+            .filter { app -> context.packageManager.getLaunchIntentForPackage(app.packageName) != null }
             .map(KnownDriftApp::packageName)
-            .filter { it in knownPackages }
             .toCollection(linkedSetOf())
-        return installedDefaults
     }
 
     @Suppress("DEPRECATION")

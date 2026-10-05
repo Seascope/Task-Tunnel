@@ -2,7 +2,7 @@
 
 ## Plain-language summary
 
-Task Tunnel runs locally on the Android device. The MVP has no account, sync backend, analytics SDK, telemetry, or user-data upload. Core protection and activity processing stay on-device. It uses Accessibility access to understand a narrow set of visible Instagram, YouTube, and TikTok surfaces and protect a purpose chosen by the user.
+Task Tunnel runs locally on the Android device. It has no account, cloud sync, analytics SDK, or background telemetry. Core protection and activity processing stay on-device. It uses Accessibility access to understand a narrow set of visible Instagram, YouTube, and TikTok surfaces and protect a purpose chosen by the user. The only user-data network path is the optional feedback form, which sends data only after the user taps **Send feedback**.
 
 ## Data used while protection runs
 
@@ -31,7 +31,9 @@ The diagnostic report excludes app content, message text, usernames, accessibili
 
 ## External services
 
-Task Tunnel does not declare the Internet permission. There is no background analytics, telemetry, remote detector-rule download, activity-history upload, accessibility-text upload, or app-content upload.
+Task Tunnel declares the Internet permission so the explicit in-app feedback form can submit to the configured Formspree endpoint. A submission always contains the selected feedback category, the user-written report, and a Task Tunnel Android source label. If the user enables **Include app status**, it also contains only the Task Tunnel version, Android version, Accessibility on/off, master protection on/off, Drift on/off, and notification-controls on/off.
+
+There is no background analytics, telemetry, remote detector-rule download, activity-history upload, accessibility-text upload, screenshot upload, Drift-path upload, or app-content upload. Feedback is not sent silently or automatically.
 
 The Drift picker uses normal launcher-intent visibility to list launchable apps and excludes Task Tunnel itself; `QUERY_ALL_PACKAGES` is not requested. Detailed accessibility-tree classification remains limited to Instagram, YouTube, and TikTok.
 

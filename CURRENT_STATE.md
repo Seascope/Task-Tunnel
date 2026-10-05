@@ -1,6 +1,15 @@
 # Current State
 
 
+## Final Play hardening — 2026-10-03
+
+- Restored direct in-app tester feedback at **Settings > Report a bug**. Submissions go to a configured Formspree form only after the user taps **Send feedback**. The report contains the selected category and user-written message; **Include app status** is opt-in and adds only app/Android version plus Accessibility, master-protection, Drift, and notification-control on/off state. Attention history, Drift paths, accessibility text, screenshots, usernames, searches, messages, and app content are never attached.
+- Fixed Drift self-observation so Task Tunnel excludes its actual runtime package instead of the old placeholder package. This stays correct after changing the Play `applicationId`.
+- Fixed notification-driven purpose replacement while the protected app is not foreground: the replacement session now starts in the existing quick-return-grace state instead of surviving indefinitely off-app.
+- Guarded the dynamic screen-state broadcast receiver against duplicate registration when Android reconnects the AccessibilityService.
+- The clean source tree intentionally contains no Formspree form ID. A tester/release build must configure `TASK_TUNNEL_FEEDBACK_FORM_ID` as documented in `FEEDBACK_SETUP.md`; the release preflight fails by default when it is missing.
+- Full Gradle execution was not possible in the final audit sandbox because Gradle 9.7.1 was not locally cached and external download was unavailable. Pure coordinator sources compile with the installed Kotlin compiler, XML/static release checks pass, and the final signed build still requires the local Gradle/unit/lint/device commands in `FINAL_AUDIT_2026-10-03.md`.
+
 ## Release candidate stabilization — 2026-09-23
 
 This section is the current source of truth for release work. Older milestone sections below are historical and may describe narrower app scope or earlier UI.
@@ -15,9 +24,9 @@ This section is the current source of truth for release work. Older milestone se
 - Screen OFF/keyguard is a UI boundary: overlays and directed navigation are cancelled while coordinator state is preserved. Unlock/reconnect performs fresh foreground reconciliation.
 - Current manual release gate is `MANUAL_TEST_RELEASE_CANDIDATE.md`; older `MANUAL_TEST_M*.md` files are historical milestone records.
 - Current Play-review preparation is `PLAY_REVIEW_CHECKLIST.md`, `PLAY_REVIEW_VIDEO_SCRIPT.md`, `ACCESSIBILITY_DISCLOSURE.md`, `PRIVACY_SUMMARY.md`, and `RELEASE_AUDIT_RC.md`.
-- Production manifest currently declares only `POST_NOTIFICATIONS`; there is no `INTERNET` permission, analytics SDK, account system, Formspree/feedback backend, or remote detector-rule path.
+- Production manifest declares `POST_NOTIFICATIONS` plus `INTERNET`. Internet access is used only by the explicit **Report a bug / Send feedback** flow; there is no background analytics, account system, telemetry, remote detector-rule path, or activity-history upload.
 - Accessibility metadata remains `isAccessibilityTool=false`. The service is exported for Android system discovery and protected by `BIND_ACCESSIBILITY_SERVICE`; the notification action receiver is not exported.
-- `com.example.tasktunnel` remains a deliberate publication blocker until a permanent application ID is chosen. Do not change it implicitly during feature/bug work.
+- The Play-bound application ID is now `com.rubin.tasktunnel`. Because the Play application ID becomes permanent after first upload, verify that this exact identity is desired before creating the first Play Console release. The Kotlin namespace remains `com.example.tasktunnel` and is not the published package identity.
 
 ## Active Tunnel notification controls — 2026-09-22
 
@@ -104,9 +113,9 @@ Status: automated implementation and repository verification are complete; physi
 - Developer diagnostics remain useful in debug builds. Navigation and routing to detector cards, confidence, fingerprints, raw package transitions, inspector nodes, and the test overlay are gated by `BuildConfig.DEBUG`; release-oriented routing falls back to production-safe diagnostics.
 - Settings now provides the normal-user **Clear Attention history** action with confirmation, local-storage explanation, privacy/disclosure access, diagnostics, app version, and debug-only developer options. Clearing uses the existing Room repository and returns Attention to its empty state; database failures degrade to a recoverable unavailable state instead of a stack trace.
 - OEM/background handling is deliberately small: enabled access with a disconnected service shows Limited protection, explains that interventions may not appear, offers the normal Accessibility repair flow, and suggests checking background restriction only if interruption continues. M6 requests no battery-optimization exemption and adds no manufacturer database.
-- Release hardening uses scoped `<queries>` visibility instead of `QUERY_ALL_PACKAGES`, declares no Internet permission, updates production service labels/descriptions, and excludes the Attention database plus onboarding/Drift preferences from backup/device transfer.
+- Release hardening uses scoped `<queries>` visibility instead of `QUERY_ALL_PACKAGES`, limits Internet access to explicit user-submitted feedback, updates production service labels/descriptions, and excludes the Attention database plus onboarding/Drift preferences from backup/device transfer.
 - `compileSdk` and `targetSdk` are API 37, satisfying the dossier's API 36-or-higher baseline. The release manifest keeps the launcher activity exported and the AccessibilityService exported as required for system discovery while protecting it with `BIND_ACCESSIBILITY_SERVICE`; service metadata explicitly declares `isAccessibilityTool=false`.
-- `com.example.tasktunnel` remains the application ID and is an explicit publication blocker. No permanent company/domain namespace, signing key, trademark clearance, privacy-policy URL, or Play Console approval is claimed or invented.
+- The release-candidate application ID is `com.rubin.tasktunnel`. Signing key, trademark clearance, privacy-policy URL, final Data Safety answers, and Play Console approval still remain external release tasks.
 - Play/privacy preparation now lives in `ACCESSIBILITY_DISCLOSURE.md`, `PRIVACY_SUMMARY.md`, `PLAY_REVIEW_VIDEO_SCRIPT.md`, `PLAY_REVIEW_CHECKLIST.md`, and `RELEASE_AUDIT_M6.md`. `MANUAL_TEST_M6.md` covers first run, repair, runtime regression, lifecycle, Android UI modes, app updates, OEMs, privacy, and release builds. These are preparation materials and require live policy/Console verification at submission time.
 - Focused M6 JVM tests cover active/off/limited health, single-UNKNOWN fail-open behavior, missing apps, disconnected service, empty compatibility evidence, sanitized diagnostics/release gating, first run, settings return, declined access, completion, and non-spamming re-entry. All 13 focused M6 tests pass.
 - The complete debug JVM suite passes 107 tests with zero failures. The connected Android 16 instrumentation suite passes 2 tests, including Attention Room persistence/reopen/clear behavior. `:app:assembleDebug` and unsigned `:app:assembleRelease` pass; release lint-vital also passes as part of assembly. `git diff --check` reports no whitespace errors. APKs: `app\build\outputs\apk\debug\app-debug.apk` and `app\build\outputs\apk\release\app-release-unsigned.apk`.

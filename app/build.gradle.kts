@@ -1,8 +1,23 @@
+import java.util.Properties
+
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
+
+
+val taskTunnelLocalProperties = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use(::load)
+}
+val feedbackFormId = (
+    providers.gradleProperty("TASK_TUNNEL_FEEDBACK_FORM_ID").orNull
+        ?: taskTunnelLocalProperties.getProperty("TASK_TUNNEL_FEEDBACK_FORM_ID")
+        ?: providers.environmentVariable("TASK_TUNNEL_FEEDBACK_FORM_ID").orNull
+        ?: ""
+).trim()
+
 
 android {
     namespace = "com.example.tasktunnel"
@@ -11,13 +26,14 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.tasktunnel"
+        applicationId = "com.rubin.tasktunnel"
         minSdk = 24
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "FEEDBACK_FORM_ID", "\"${feedbackFormId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
 
     buildTypes {
@@ -47,6 +63,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)

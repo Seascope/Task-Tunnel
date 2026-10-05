@@ -111,8 +111,15 @@ object AccessibilityRuntime {
     internal fun update(transform: (AccessibilityState) -> AccessibilityState) =
         mutableState.update(transform)
 
-    internal fun heartbeat(nowMillis: Long = System.currentTimeMillis()) = mutableState.update {
-        it.copy(connected = true, lastHeartbeatMillis = nowMillis)
+    internal fun heartbeat(nowMillis: Long = System.currentTimeMillis()) = mutableState.update { state ->
+        val lastHeartbeat = state.lastHeartbeatMillis
+        if (state.connected && lastHeartbeat != null &&
+            nowMillis >= lastHeartbeat && nowMillis - lastHeartbeat < HEARTBEAT_PUBLISH_INTERVAL_MILLIS
+        ) {
+            state
+        } else {
+            state.copy(connected = true, lastHeartbeatMillis = nowMillis)
+        }
     }
 
     fun setInspectionArmed(armed: Boolean) {
@@ -155,13 +162,25 @@ object AccessibilityRuntime {
         TaskTunnelAccessibilityService.current?.onIntentionalCheckInsEnabledChanged(enabled)
     }
 
+    fun onNotificationSettingsChanged() {
+        TaskTunnelAccessibilityService.current?.onNotificationSettingsChanged()
+    }
+
     fun onAttentionHistoryCleared() {
         TaskTunnelAccessibilityService.current?.onAttentionHistoryCleared()
     }
 
-    internal fun clearCurrentYouTubeDetection() = mutableState.update { it.copy(currentYouTubeDetection = null) }
+    internal fun clearCurrentYouTubeDetection() = mutableState.update { state ->
+        if (state.currentYouTubeDetection == null) state else state.copy(currentYouTubeDetection = null)
+    }
 
-    internal fun clearCurrentInstagramDetection() = mutableState.update { it.copy(currentInstagramDetection = null) }
+    internal fun clearCurrentInstagramDetection() = mutableState.update { state ->
+        if (state.currentInstagramDetection == null) state else state.copy(currentInstagramDetection = null)
+    }
 
-    internal fun clearCurrentTikTokCapture() = mutableState.update { it.copy(currentTikTokCapture = null) }
+    internal fun clearCurrentTikTokCapture() = mutableState.update { state ->
+        if (state.currentTikTokCapture == null) state else state.copy(currentTikTokCapture = null)
+    }
+
+    private const val HEARTBEAT_PUBLISH_INTERVAL_MILLIS = 5_000L
 }

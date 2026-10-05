@@ -50,7 +50,7 @@ Developer-only fingerprints and the sanitized tree inspector are guarded by `Bui
 
 ## Processing, backup, and control
 
-Accessibility processing occurs locally on the device. There is no Task Tunnel account, cloud sync, telemetry, remote detector-rule download, or user-data upload.
+Accessibility processing occurs locally on the device. There is no Task Tunnel account, cloud sync, telemetry, or remote detector-rule download. The optional feedback form is a separate, explicit user action: it uses the network only after the user taps **Send feedback**, and sends only the user-entered feedback plus any safe app-status fields the user chooses to include. It does not upload accessibility text, Attention history, Drift paths, screenshots, messages, searches, usernames, or app content.
 
 Task Tunnel's local database and shared preferences are excluded from Android cloud backup and device-to-device transfer. Clearing local history removes both Attention events and tracked supported-app activity history.
 

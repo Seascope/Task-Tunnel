@@ -32,19 +32,18 @@ class AttentionViewModel(application: Application) : AndroidViewModel(applicatio
     private val analysisWindowStartMillis = System.currentTimeMillis() - ANALYSIS_QUERY_WINDOW_MILLIS
 
     val uiState = combine(
-        repository.observeRecent().catch {
-            historyAvailable.value = false
-            emit(emptyList())
-        },
         repository.observeSince(analysisWindowStartMillis).catch {
             historyAvailable.value = false
             emit(emptyList())
         },
         timeRefreshes(),
         historyAvailable,
-    ) { recentEvents, analysisEvents, nowMillis, available ->
+    ) { analysisEvents, nowMillis, available ->
+        val activityEvents = analysisEvents.filter {
+            it.timestampMillis >= ActivityHistoryWindow.startMillis(nowMillis)
+        }
         AttentionUiState(
-            episodes = AttentionEpisodeGrouper.group(recentEvents),
+            episodes = AttentionEpisodeGrouper.group(activityEvents),
             metrics = AttentionMetrics.from(analysisEvents, nowMillis),
             dailyRecap = DailyAttentionRecap.from(analysisEvents, nowMillis),
             review = AttentionReview.from(analysisEvents, nowMillis),

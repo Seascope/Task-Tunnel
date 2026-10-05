@@ -17,6 +17,7 @@ Record a short, continuous, factual demonstration on the final release candidate
 13. Return to Task Tunnel and show **Attention** with the local session history. Briefly show **Review** only if it has a real high-confidence insight; an empty Review is acceptable.
 14. Open **Protection** and show the supported apps, check-ins, Drift configuration, and Advanced/troubleshooting separation.
 15. Open **Settings > Privacy** and show the Accessibility/privacy explanation. Open **Advanced options > Troubleshooting** and show that the production report contains technical status rather than app content.
-16. Show **Clear activity history** and its confirmation dialog. Complete the clear only if useful for the reviewer flow.
+16. Open **Settings > Report a bug**. Show that feedback is sent only after tapping **Send feedback**, and that **Include app status** is optional and names the limited status fields; do not submit real sensitive content in the review recording.
+17. Show **Clear activity history** and its confirmation dialog. Complete the clear only if useful for the reviewer flow.
 
 Before submission, compare this script with the exact shipped UI and the live Play Console Accessibility declaration. The current Google Play policy requires non-accessibility-tool apps using AccessibilityService to provide an in-app prominent disclosure, describe accessed data and use, and obtain affirmative consent before the sensitive capability is enabled. This script is review evidence, not a guarantee of approval.

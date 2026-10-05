@@ -7,8 +7,9 @@ class DriftCoordinator(
     selectedPackages: Set<String>,
     policy: DriftPolicy = DriftPolicy(),
     idFactory: () -> String = { java.util.UUID.randomUUID().toString() },
+    ignoredPackages: Set<String> = DriftDetector.DEFAULT_IGNORED_PACKAGES,
 ) {
-    private val detector = DriftDetector(selectedPackages, policy, idFactory)
+    private val detector = DriftDetector(selectedPackages, policy, idFactory, ignoredPackages)
     var foregroundPackage: String? = null
         private set
 

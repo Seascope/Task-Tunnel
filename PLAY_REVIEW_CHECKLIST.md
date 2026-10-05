@@ -4,8 +4,8 @@ This checklist prepares an eventual submission. Re-verify every policy item and 
 
 ## Release blockers requiring a human decision
 
-- [ ] Choose the permanent application ID. The current `com.example.tasktunnel` namespace is a placeholder and must not be published accidentally.
-- [ ] Decide the final publisher/company domain namespace before changing the application ID.
+- [ ] Confirm that `com.rubin.tasktunnel` is the permanent Play application ID you want. It becomes effectively immutable after the first Play upload.
+- [x] Kotlin/Android namespace may remain `com.example.tasktunnel`; it is separate from the published `applicationId`.
 - [ ] Create and securely manage the Play App Signing/upload-key workflow. No signing key is created or committed by M6.
 - [ ] Decide whether **Task Tunnel** remains the public name and complete appropriate trademark/name review. It is a working name only.
 - [ ] Choose final `versionName`/`versionCode` for the first external build; the project currently uses `1.0` / `1`.
@@ -22,14 +22,15 @@ This checklist prepares an eventual submission. Re-verify every policy item and 
 - [x] Package visibility uses targeted entries for known apps plus `MAIN`/`LAUNCHER` intent visibility so the user-facing Drift picker can list launchable apps; `QUERY_ALL_PACKAGES` is absent.
 - [x] Detailed accessibility-tree parsing remains limited to Instagram, YouTube, and TikTok; arbitrary Drift-only apps contribute foreground package identity only.
 - [x] `QUERY_ALL_PACKAGES` is absent.
-- [x] Internet permission is absent; no analytics, telemetry, remote rules, or activity-history upload exists.
+- [x] Internet permission is limited to explicit user-submitted feedback. There is no background analytics, telemetry, remote rules, activity-history upload, accessibility-text upload, or app-content upload.
 - [x] No unused dangerous permissions are declared.
 - [x] Application and service labels describe Task Tunnel protection rather than a developer spike.
 - [x] Attention database, WAL, SHM, onboarding, and Drift preference files are excluded from cloud backup and device transfer.
 - [x] Release configuration does not require private signing credentials for an unsigned assemble check.
 - [x] No production logging statements were found in app source.
 - [ ] Re-run manifest/aapt inspection on the final signed artifact.
-- [ ] Run `python scripts/release_preflight.py` on the final Play-bound tree; it must pass without the placeholder-ID override.
+- [ ] Configure `TASK_TUNNEL_FEEDBACK_FORM_ID` for the tester/release build and send one real test report.
+- [ ] Run `python scripts/release_preflight.py` on the final Play-bound tree; it must pass with no override flags.
 
 ## Accessibility declaration and disclosure
 
@@ -46,7 +47,7 @@ This checklist prepares an eventual submission. Re-verify every policy item and 
 ## Store and policy submission
 
 - [ ] Re-check the current target API deadline and all AccessibilityService policy pages at submission time.
-- [ ] Complete the Data safety form from actual release behavior; do not copy assumptions from this checklist.
+- [ ] Complete the Data safety form from actual release behavior; do not copy assumptions from this checklist. Include the explicit feedback submission path and Formspree processing in the assessment.
 - [ ] Confirm the public privacy policy, store description, screenshots, and review notes use consistent claims.
 - [ ] Explain why AccessibilityService is necessary for the user-facing Task Tunnel feature and why narrower APIs cannot identify native app surfaces.
 - [ ] Explain the launcher-intent package visibility used by the Drift app picker and confirm the final merged manifest still has no `QUERY_ALL_PACKAGES` permission.

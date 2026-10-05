@@ -187,8 +187,10 @@ Run these quickly; do not wait for UI to settle unless the step says to.
 
 ## P1 — privacy and release integrity
 
-- [ ] Inspect release manifest: no INTERNET permission, no feedback/Formspree backend, no analytics SDK/account dependency.
-- [ ] Run `python scripts/release_preflight.py --allow-placeholder-id` during beta hardening; before Play upload run it again without the override and require PASS.
+- [ ] Inspect the release manifest: `INTERNET` exists only for explicit feedback, `QUERY_ALL_PACKAGES` is absent, and no analytics SDK/account dependency was added.
+- [ ] Configure `TASK_TUNNEL_FEEDBACK_FORM_ID`. From **Settings > Report a bug**, submit once with **Include app status** off and once on. Confirm the configured feedback inbox receives exactly the documented fields and no Attention history, Drift path, accessibility text, screenshot, username, search, message, or app content.
+- [ ] Disable network and submit feedback. The screen reports a retryable failure without losing/crashing the rest of Task Tunnel.
+- [ ] Run `python scripts/release_preflight.py` with no override flags and require PASS before building the artifact.
 - [ ] Accessibility service remains `isAccessibilityTool=false` and the service description names Instagram, YouTube, and TikTok appropriately.
 - [ ] Onboarding requires affirmative disclosure consent before opening Accessibility settings and provides a clear **Not now** path.
 - [ ] Normal UI never exposes detector confidence, resource IDs, package IDs, node trees/counts, fingerprints, or raw accessibility text.
@@ -196,7 +198,7 @@ Run these quickly; do not wait for UI to settle unless the step says to.
 - [ ] Clear activity history, cancel once, then confirm. After confirmed clear, old queued writes must not reappear.
 - [ ] Backup/data-extraction rules exclude local history database/WAL/SHM as intended.
 - [ ] Release build does not expose debug inspector, developer fingerprint controls, raw package transitions, visual-QA overlay, or test controls.
-- [ ] Permanent application ID decision is made before Play upload; do not ship `com.example.tasktunnel` as the production identity.
+- [ ] Confirm `com.rubin.tasktunnel` is the permanent application ID desired before the first Play upload.
 - [ ] Signed AAB, upload key, privacy-policy URL, store listing, Data Safety answers, Accessibility declaration/video, and closed testing are complete before production review.
 
 ## Release decision

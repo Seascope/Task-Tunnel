@@ -125,6 +125,26 @@ class TunnelCoordinatorTest {
     }
 
     @Test
+    fun purposeChangeStartedWhileAwayUsesQuickReturnGrace() {
+        val coordinator = activeInstagramMessagesCoordinator()
+        coordinator.observeForeground("com.example.other", 10)
+        assertTrue(coordinator.requestPurposeChange("session-1", 20))
+
+        coordinator.startSession(
+            TunnelTask.INSTAGRAM_SEARCH,
+            nowMillis = 20,
+            evaluateCurrentSurface = false,
+        )
+
+        assertEquals(20L, coordinator.state.leftProtectedAppAtMillis)
+        coordinator.advanceTime(20 + TunnelCoordinator.DEFAULT_QUICK_RETURN_GRACE_MILLIS + 1)
+        assertNull(coordinator.state.activeSession)
+
+        coordinator.observeForeground(SupportedApp.INSTAGRAM.packageName, 20 + TunnelCoordinator.DEFAULT_QUICK_RETURN_GRACE_MILLIS + 2)
+        assertTrue(coordinator.state.prompt is TunnelPrompt.PurposeGate)
+    }
+
+    @Test
     fun dismissingPurposeChangeKeepsOriginalTunnel() {
         val coordinator = activeInstagramMessagesCoordinator()
         val original = coordinator.state.activeSession

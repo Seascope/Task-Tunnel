@@ -153,7 +153,6 @@ class DriftDetector(
 
     companion object {
         val DEFAULT_IGNORED_PACKAGES = setOf(
-            "com.example.tasktunnel",
             "com.android.systemui",
         )
     }

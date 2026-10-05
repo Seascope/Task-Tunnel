@@ -47,6 +47,7 @@ import com.example.tasktunnel.diagnostics.TikTokFingerprint
 import com.example.tasktunnel.diagnostics.YouTubeFingerprint
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.drift.DriftCoordinator
+import com.example.tasktunnel.drift.DriftDetector
 import com.example.tasktunnel.drift.DriftEpisode
 import com.example.tasktunnel.drift.DriftPoolPreferences
 import com.example.tasktunnel.friction.AdaptiveFrictionEngine
@@ -73,7 +74,12 @@ import java.util.ArrayDeque
 class TaskTunnelAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val tunnelCoordinator = TunnelCoordinator()
-    private val driftCoordinator = DriftCoordinator(DriftAppCatalog.knownPackages)
+    private val driftCoordinator by lazy {
+        DriftCoordinator(
+            selectedPackages = DriftAppCatalog.knownPackages,
+            ignoredPackages = DriftDetector.DEFAULT_IGNORED_PACKAGES + packageName,
+        )
+    }
     private val adaptiveFrictionEngine = AdaptiveFrictionEngine()
     private val adaptiveFrictionStore by lazy { AdaptiveFrictionStore(applicationContext) }
     private val attentionRecorder by lazy { AttentionHistory.recorder(applicationContext) }
@@ -101,6 +107,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     // but never leave app UI floating over the lock screen.
                     handler.removeCallbacks(showOverlay)
                     handler.removeCallbacks(trailingCapture)
+                    handler.removeCallbacks(notificationProgressRefresh)
                     cancelProtectionResumeRetry()
                     clearYouTubeSubscriptionProbe()
                     removeTestOverlay()
@@ -163,6 +170,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     private var youTubeSubscriptionProbeAttemptsRemaining = 0
     private var youTubeSubscriptionProbePending = false
     private var youTubeSubscriptionProbeWatchingUnresolvedSurface = false
+    private var youTubeUnresolvedProbeAttemptsRemaining = 0
     private var youTubeSubscriptionProbeDelayMs = YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS
     private val youTubeWatchSubscriptionGuard = YouTubeWatchSubscriptionGuard()
     private var lastCaptureAtElapsed = 0L
@@ -240,6 +248,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         current = this
         protectionEnabled = ProtectionMasterPreferences.load(this)
+        applyAccessibilityEventSubscription(protectionEnabled)
         tunnelNotificationController.ensureChannel()
         // Reconcile any notification left behind by an abrupt prior process/service death. The
         // coordinator is the source of truth; a fresh coordinator means there is no live tunnel.
@@ -253,14 +262,20 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
         val connectedAtMillis = System.currentTimeMillis()
         syncTunnelState { it.copy(connected = true, lastHeartbeatMillis = connectedAtMillis) }
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_ON)
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_USER_PRESENT)
+        if (!screenReceiverRegistered) {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(screenReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(screenReceiver, filter)
+            }
+            screenReceiverRegistered = true
         }
-        if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(screenReceiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
-        else @Suppress("DEPRECATION") registerReceiver(screenReceiver, filter)
-        screenReceiverRegistered = true
         setDeviceInteractionReady(isDeviceInteractionReady(), connectedAtMillis)
         if (protectionEnabled && deviceInteractionReady) {
             resumeProtectionFromCurrentForeground(connectedAtMillis)
@@ -277,6 +292,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
         if (!isInspectionEvent) return
         if (!protectionEnabled) return
+        // Drift/tunnel foreground transitions only need window events outside the supported apps.
+        // Content/scroll/click traffic from every other app can be extremely noisy, so discard it
+        // before touching PowerManager, the active root, coordinators, Room-backed tracking, or UI.
+        val eventPackageName = event.packageName?.toString()
+        if (!isWindowEvent && eventPackageName != null && eventPackageName !in TARGET_PACKAGES) return
         val nowMillis = System.currentTimeMillis()
         setDeviceInteractionReady(isDeviceInteractionReady(), nowMillis)
         if (!deviceInteractionReady) {
@@ -323,13 +343,18 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         if (directedNavigationOwnerPackage != null && directedNavigationOwnerPackage != packageName) {
             invalidateDirectedNavigation()
         }
-        surfaceUsageTracker.foregroundChanged(packageName, nowMillis)
-        tunnelCoordinator.observeForeground(packageName, nowMillis)
-        driftCoordinator.observeForeground(
-            packageName = packageName,
-            nowMillis = nowMillis,
-        )
-        updateTunnelUi()
+        val runtimeForegroundChanged = AccessibilityRuntime.state.value.foregroundPackage != packageName
+        val foregroundChanged = tunnelCoordinator.state.foregroundPackage != packageName ||
+            driftCoordinator.foregroundPackage != packageName
+        if (foregroundChanged) {
+            surfaceUsageTracker.foregroundChanged(packageName, nowMillis)
+            tunnelCoordinator.observeForeground(packageName, nowMillis)
+            driftCoordinator.observeForeground(
+                packageName = packageName,
+                nowMillis = nowMillis,
+            )
+            updateTunnelUi()
+        }
         val activeSession = tunnelCoordinator.state.activeSession
         val isYouTubeSubscriptionsSession =
             packageName == YouTubeSurfaceDetector.YOUTUBE_PACKAGE &&
@@ -386,30 +411,32 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         val leftTarget = packageName !in TARGET_PACKAGES && previousTargetPackage != null
         lastTargetPackage = packageName.takeIf { it in TARGET_PACKAGES }
 
-        AccessibilityRuntime.update {
-            val history = if (it.foregroundPackage != packageName) {
-                (listOf(PackageTransition(packageName, System.currentTimeMillis())) + it.packageHistory).take(MAX_HISTORY)
-            } else it.packageHistory
-            val inspectionStatus = when {
-                !it.inspectionArmed -> it.inspectionStatus
-                packageName !in TARGET_PACKAGES -> InspectionStatus.UNSUPPORTED_APP
-                targetChanged -> InspectionStatus.ARMED
-                else -> it.inspectionStatus
+        if (runtimeForegroundChanged || BuildConfig.DEBUG || state.inspectionArmed) {
+            AccessibilityRuntime.update {
+                val history = if (it.foregroundPackage != packageName) {
+                    (listOf(PackageTransition(packageName, nowMillis)) + it.packageHistory).take(MAX_HISTORY)
+                } else it.packageHistory
+                val inspectionStatus = when {
+                    !it.inspectionArmed -> it.inspectionStatus
+                    packageName !in TARGET_PACKAGES -> InspectionStatus.UNSUPPORTED_APP
+                    targetChanged -> InspectionStatus.ARMED
+                    else -> it.inspectionStatus
+                }
+                val inspectionDetail = when {
+                    !it.inspectionArmed -> it.inspectionDetail
+                    packageName !in TARGET_PACKAGES -> "Inspection supports Instagram, YouTube, and TikTok."
+                    targetChanged -> "Target changed; waiting for a fresh tree."
+                    else -> it.inspectionDetail
+                }
+                it.copy(
+                    foregroundPackage = packageName,
+                    lastRelevantEvent = eventTypeName(event.eventType),
+                    packageHistory = history,
+                    snapshot = if (targetChanged || leftTarget) null else it.snapshot,
+                    inspectionStatus = inspectionStatus,
+                    inspectionDetail = inspectionDetail,
+                )
             }
-            val inspectionDetail = when {
-                !it.inspectionArmed -> it.inspectionDetail
-                packageName !in TARGET_PACKAGES -> "Inspection supports Instagram, YouTube, and TikTok."
-                targetChanged -> "Target changed; waiting for a fresh tree."
-                else -> it.inspectionDetail
-            }
-            it.copy(
-                foregroundPackage = packageName,
-                lastRelevantEvent = eventTypeName(event.eventType),
-                packageHistory = history,
-                snapshot = if (targetChanged || leftTarget) null else it.snapshot,
-                inspectionStatus = inspectionStatus,
-                inspectionDetail = inspectionDetail,
-            )
         }
 
         if (packageName !in TARGET_PACKAGES) handler.removeCallbacks(trailingCapture)
@@ -774,6 +801,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     fun onProtectionEnabledChanged(enabled: Boolean) {
         if (protectionEnabled == enabled) return
         protectionEnabled = enabled
+        applyAccessibilityEventSubscription(enabled)
         val nowMillis = System.currentTimeMillis()
         if (!enabled) {
             tunnelCoordinator.state.activeSession?.let { session ->
@@ -823,6 +851,14 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         }
 
         resumeProtectionFromCurrentForeground(nowMillis)
+    }
+
+    private fun applyAccessibilityEventSubscription(enabled: Boolean) {
+        val info = serviceInfo ?: return
+        val desiredEventTypes = if (enabled) REQUESTED_ACCESSIBILITY_EVENT_TYPES else 0
+        if (info.eventTypes == desiredEventTypes) return
+        info.eventTypes = desiredEventTypes
+        setServiceInfo(info)
     }
 
     private fun resumeProtectionFromCurrentForeground(nowMillis: Long) {
@@ -894,6 +930,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         driftCoordinator.updateSelectedPackages(packages)
         removeDriftOverlay()
         updateTunnelUi()
+    }
+
+    fun onNotificationSettingsChanged() {
+        tunnelNotificationController.invalidateRenderState()
+        tunnelNotificationController.sync(tunnelCoordinator.state)
+        scheduleNotificationProgressRefresh()
     }
 
     fun onIntentionalCheckInsEnabledChanged(enabled: Boolean) {
@@ -1124,6 +1166,9 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
                     (it.surface == YouTubeSurface.YOUTUBE_VIDEO || it.surface == YouTubeSurface.YOUTUBE_SHORTS)
                 ) {
                     if (it.creatorSubscriptionState == null) {
+                        if (!youTubeSubscriptionProbeWatchingUnresolvedSurface) {
+                            youTubeUnresolvedProbeAttemptsRemaining = YOUTUBE_UNRESOLVED_PROBE_ATTEMPTS
+                        }
                         youTubeSubscriptionProbeWatchingUnresolvedSurface = true
                         scheduleYouTubeSubscriptionProbeIfNeeded()
                     } else {
@@ -1359,6 +1404,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(youTubeSubscriptionProbe)
         youTubeSubscriptionProbePending = false
         youTubeSubscriptionProbeWatchingUnresolvedSurface = false
+        youTubeUnresolvedProbeAttemptsRemaining = 0
         youTubeSubscriptionProbeAttemptsRemaining = YOUTUBE_SUBSCRIPTION_PROBE_ATTEMPTS
         youTubeSubscriptionProbeDelayMs = YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS
         scheduleYouTubeSubscriptionProbeIfNeeded()
@@ -1366,11 +1412,11 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun scheduleYouTubeSubscriptionProbeIfNeeded() {
         if (youTubeSubscriptionProbePending) return
-        if (!youTubeSubscriptionProbeWatchingUnresolvedSurface &&
-            youTubeSubscriptionProbeAttemptsRemaining <= 0
-        ) return
-
-        if (!youTubeSubscriptionProbeWatchingUnresolvedSurface) {
+        if (youTubeSubscriptionProbeWatchingUnresolvedSurface) {
+            if (youTubeUnresolvedProbeAttemptsRemaining <= 0) return
+            youTubeUnresolvedProbeAttemptsRemaining -= 1
+        } else {
+            if (youTubeSubscriptionProbeAttemptsRemaining <= 0) return
             youTubeSubscriptionProbeAttemptsRemaining -= 1
         }
         val delayMs = youTubeSubscriptionProbeDelayMs
@@ -1386,6 +1432,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         youTubeSubscriptionProbeAttemptsRemaining = 0
         youTubeSubscriptionProbePending = false
         youTubeSubscriptionProbeWatchingUnresolvedSurface = false
+        youTubeUnresolvedProbeAttemptsRemaining = 0
         youTubeSubscriptionProbeDelayMs = YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS
         handler.removeCallbacks(youTubeSubscriptionProbe)
     }
@@ -1518,7 +1565,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
 
     private fun scheduleNotificationProgressRefresh() {
         handler.removeCallbacks(notificationProgressRefresh)
-        if (!protectionEnabled) return
+        if (!protectionEnabled || !deviceInteractionReady) return
         if (!tunnelNotificationController.shouldRefreshProgress(tunnelCoordinator.state)) return
         handler.postDelayed(notificationProgressRefresh, TunnelNotificationController.PROGRESS_REFRESH_MILLIS)
     }
@@ -3982,6 +4029,12 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
     companion object {
         private const val PURPOSE_GATE_EXIT_DURATION_MS = 140L
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
+        private val REQUESTED_ACCESSIBILITY_EVENT_TYPES =
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                AccessibilityEvent.TYPE_VIEW_SCROLLED or
+                AccessibilityEvent.TYPE_VIEW_CLICKED
         internal var current: TaskTunnelAccessibilityService? = null
         private val TARGET_PACKAGES = setOf(
             InstagramSurfaceDetector.INSTAGRAM_PACKAGE,
@@ -4003,6 +4056,7 @@ class TaskTunnelAccessibilityService : AccessibilityService() {
         // increasing the steady-state capture rate used outside active tunnel decisions.
         private const val ACTIVE_TUNNEL_CAPTURE_THROTTLE_MS = 400L
         private const val YOUTUBE_SUBSCRIPTION_PROBE_ATTEMPTS = 2
+        private const val YOUTUBE_UNRESOLVED_PROBE_ATTEMPTS = 7
         private const val YOUTUBE_SUBSCRIPTION_PROBE_SETTLE_MS = 650L
         private const val DEADLINE_RETRY_MS = 1_000L
         private const val PROTECTION_RESUME_RETRY_MS = 250L

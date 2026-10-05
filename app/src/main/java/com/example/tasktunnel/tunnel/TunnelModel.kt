@@ -493,7 +493,10 @@ class TunnelCoordinator(
             currentSurface = normalizedCurrentSurface,
             currentSurfaceObservedAtMillis = state.currentSurfaceObservedAtMillis,
             detourAllow = null,
-            leftProtectedAppAtMillis = null,
+            // A notification-driven purpose change is allowed while Home or another app owns
+            // foreground. Treat the replacement tunnel as already "away" so open-ended sessions
+            // cannot live forever outside the protected app and quick-return grace still applies.
+            leftProtectedAppAtMillis = nowMillis.takeIf { state.foregroundPackage != task.app.packageName },
         )
         val session = state.activeSession
         if (session != null && checkInsEnabled && task.isOpenEndedBrowse && intendedDurationMillis == null) {

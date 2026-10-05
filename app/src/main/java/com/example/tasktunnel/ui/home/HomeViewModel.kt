@@ -17,7 +17,6 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import java.util.Calendar
 import java.util.TimeZone
@@ -30,7 +29,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     val uiState = merge(
         repository.observeRecent().map { RefreshSignal.DataChanged }.catch { emit(RefreshSignal.Unavailable) },
-        refreshRequests.map { RefreshSignal.DataChanged }.onStart { emit(RefreshSignal.DataChanged) },
+        refreshRequests.map { RefreshSignal.DataChanged },
         midnightRefreshes().map { RefreshSignal.DataChanged },
     ).map { signal ->
         when (signal) {

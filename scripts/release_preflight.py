@@ -8,6 +8,7 @@ replacement for building/inspecting the final signed AAB or completing physical 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -15,6 +16,7 @@ from pathlib import Path
 
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 ROOT = Path(__file__).resolve().parents[1]
+FORM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def read(relative: str) -> str:
@@ -34,12 +36,31 @@ def has_exclude(root: ET.Element, parent_tag: str | None, domain: str) -> bool:
     )
 
 
+def local_property(name: str) -> str | None:
+    path = ROOT / "local.properties"
+    if not path.exists():
+        return None
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == name:
+            return value.strip()
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--allow-placeholder-id",
         action="store_true",
-        help="Permit com.example.tasktunnel for internal/beta preflight. Never use for final Play upload.",
+        help="Permit com.example.tasktunnel for historical/internal trees only. Never use for final Play upload.",
+    )
+    parser.add_argument(
+        "--allow-missing-feedback-config",
+        action="store_true",
+        help="Permit a clean source tree with no Formspree form ID. Never use for the actual tester/Play build.",
     )
     args = parser.parse_args()
 
@@ -47,12 +68,9 @@ def main() -> int:
     notes: list[str] = []
 
     manifest = parse_xml("app/src/main/AndroidManifest.xml")
-    permissions = {
-        node.get(ANDROID + "name")
-        for node in manifest.findall("uses-permission")
-    }
-    if "android.permission.INTERNET" in permissions:
-        failures.append("Manifest declares INTERNET; current Play build is expected to be local-only.")
+    permissions = {node.get(ANDROID + "name") for node in manifest.findall("uses-permission")}
+    if "android.permission.INTERNET" not in permissions:
+        failures.append("Manifest is missing INTERNET required by the explicit in-app feedback flow.")
     if "android.permission.QUERY_ALL_PACKAGES" in permissions:
         failures.append("Manifest declares QUERY_ALL_PACKAGES; Drift picker must not require it.")
 
@@ -116,6 +134,11 @@ def main() -> int:
             notes.append(message + " Allowed only because --allow-placeholder-id was supplied.")
         else:
             failures.append(message)
+    elif app_id != "com.rubin.tasktunnel":
+        notes.append(f"applicationId is {app_id!r}; confirm this is the permanent Play identity you intend to publish.")
+
+    if 'buildConfigField("String", "FEEDBACK_FORM_ID"' not in gradle:
+        failures.append("App module does not expose the configured feedback form ID through BuildConfig.")
 
     dependency_red_flags = ("firebase", "crashlytics", "sentry", "okhttp", "retrofit", "ktor-client")
     gradle_lower = gradle.lower()
@@ -123,19 +146,83 @@ def main() -> int:
         if token in gradle_lower:
             failures.append(f"App module contains unexpected network/telemetry dependency marker: {token}.")
 
-    production_text = "\n".join(
-        path.read_text(encoding="utf-8", errors="ignore")
-        for path in (ROOT / "app" / "src" / "main").rglob("*")
+    reporter = read("app/src/main/java/com/example/tasktunnel/feedback/FeedbackReporter.kt")
+    if 'https://formspree.io/f/$formId' not in reporter:
+        failures.append("FeedbackReporter is missing the expected HTTPS Formspree endpoint.")
+    if "HttpURLConnection" not in reporter:
+        failures.append("FeedbackReporter no longer contains the explicit direct-submit client.")
+    required_feedback_fields = {
+        'put("category"',
+        'put("message"',
+        'put("source"',
+        'put("app_version"',
+        'put("android_version"',
+        'put("accessibility"',
+        'put("task_tunnel"',
+        'put("drift"',
+        'put("notification_controls"',
+    }
+    for field_marker in required_feedback_fields:
+        if field_marker not in reporter:
+            failures.append(f"FeedbackReporter is missing expected bounded field marker: {field_marker}.")
+    forbidden_feedback_markers = (
+        'activity_history', 'attention_history', 'drift_path', 'accessibility_text',
+        'screenshot', 'username', 'search_query', 'message_contents', 'raw_tree',
+    )
+    reporter_lower = reporter.lower()
+    # The class comment intentionally names some forbidden categories. Only flag actual put(...) keys.
+    for marker in forbidden_feedback_markers:
+        if re.search(rf'put\(\s*"{re.escape(marker)}"', reporter_lower):
+            failures.append(f"FeedbackReporter unexpectedly includes sensitive payload key: {marker}.")
+
+    feedback_ui = read("app/src/main/java/com/example/tasktunnel/ui/FeedbackScreen.kt")
+    if "Include app status" not in feedback_ui or "Send feedback" not in feedback_ui:
+        failures.append("Tester feedback UI is missing its explicit send/status controls.")
+    settings_ui = read("app/src/main/java/com/example/tasktunnel/ui/TaskTunnelScreens.kt")
+    if 'title = "Report a bug"' not in settings_ui:
+        failures.append("Settings does not expose the tester Report a bug entry point.")
+
+    configured_form_id = (
+        os.environ.get("TASK_TUNNEL_FEEDBACK_FORM_ID")
+        or local_property("TASK_TUNNEL_FEEDBACK_FORM_ID")
+        or ""
+    ).strip()
+    if not configured_form_id:
+        message = "TASK_TUNNEL_FEEDBACK_FORM_ID is not configured; tester reports cannot be delivered."
+        if args.allow_missing_feedback_config:
+            notes.append(message + " Allowed only for this source-only audit.")
+        else:
+            failures.append(message)
+    elif not FORM_ID_PATTERN.fullmatch(configured_form_id):
+        failures.append("TASK_TUNNEL_FEEDBACK_FORM_ID is malformed; expected only letters, digits, '_' or '-'.")
+
+    production_files = [
+        path for path in (ROOT / "app" / "src" / "main").rglob("*")
         if path.is_file() and path.suffix in {".kt", ".kts", ".xml"}
-    ).lower()
-    if "formspree" in production_text:
-        failures.append("Production source still contains a Formspree reference.")
+    ]
+    formspree_sources = [
+        path.relative_to(ROOT).as_posix()
+        for path in production_files
+        if "formspree" in path.read_text(encoding="utf-8", errors="ignore").lower()
+    ]
+    expected_formspree_file = "app/src/main/java/com/example/tasktunnel/feedback/FeedbackReporter.kt"
+    unexpected_formspree = [p for p in formspree_sources if p != expected_formspree_file]
+    if expected_formspree_file not in formspree_sources:
+        failures.append("Expected Formspree reference is missing from FeedbackReporter.")
+    if unexpected_formspree:
+        failures.append("Unexpected production Formspree references: " + ", ".join(unexpected_formspree))
 
     review_script = read("PLAY_REVIEW_VIDEO_SCRIPT.md")
     if "Agree & open settings" not in review_script:
         failures.append("Play review video script is not aligned with the current affirmative onboarding action.")
     if "Instagram, YouTube, and TikTok" not in review_script:
         failures.append("Play review video script does not describe all three supported Task Tunnel apps.")
+    if "Report a bug" not in review_script:
+        failures.append("Play review video script does not disclose the explicit feedback flow.")
+
+    privacy = read("PRIVACY_SUMMARY.md")
+    if "Formspree" not in privacy or "Include app status" not in privacy:
+        failures.append("Privacy summary is not aligned with the explicit feedback network path.")
 
     print("Task Tunnel release preflight")
     print(f"Root: {ROOT}")
@@ -151,7 +238,7 @@ def main() -> int:
 
     print("\nPASS")
     print("- Static repository checks passed.")
-    print("- Still inspect/build the exact signed AAB and complete physical RC testing before upload.")
+    print("- Still build/inspect the exact signed AAB and complete physical RC testing before upload.")
     return 0
 
 

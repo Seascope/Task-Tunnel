@@ -1,5 +1,7 @@
 # M6 Release Audit
 
+> **HISTORICAL:** This is the M6 snapshot from before the final 2026-10-03 feedback/network restoration. Use `RELEASE_AUDIT_RC.md` and `FINAL_AUDIT_2026-10-03.md` for current release truth.
+
 Audit date: 20 September 2026. Scope: repository configuration and beta-readiness preparation, not Play approval.
 
 ## Findings

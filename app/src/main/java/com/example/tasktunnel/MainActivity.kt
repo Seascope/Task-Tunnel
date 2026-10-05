@@ -18,7 +18,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
@@ -27,11 +26,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.tasktunnel.accessibility.AccessibilityRuntime
 import com.example.tasktunnel.attention.AttentionViewModel
 import com.example.tasktunnel.drift.DriftAppCatalog
 import com.example.tasktunnel.drift.DriftPoolPreferences
+import com.example.tasktunnel.feedback.FeedbackStatus
 import com.example.tasktunnel.onboarding.OnboardingFlow
 import com.example.tasktunnel.onboarding.OnboardingPreferences
 import com.example.tasktunnel.onboarding.OnboardingProgress
@@ -49,6 +50,7 @@ import com.example.tasktunnel.ui.AttentionScreen
 import com.example.tasktunnel.ui.DeveloperScreen
 import com.example.tasktunnel.ui.DiagnosticsScreen
 import com.example.tasktunnel.ui.EpisodeDetailScreen
+import com.example.tasktunnel.ui.FeedbackScreen
 import com.example.tasktunnel.ui.InspectorScreen
 import com.example.tasktunnel.ui.OnboardingScreen
 import com.example.tasktunnel.ui.PrimaryDestination
@@ -80,12 +82,11 @@ class MainActivity : ComponentActivity() {
                     refreshNotificationState()
                     TunnelNotificationPreferences.markPermissionOffered(this@MainActivity)
                 }
-                val runtime by AccessibilityRuntime.state.collectAsState()
+                val runtime by AccessibilityRuntime.state.collectAsStateWithLifecycle()
                 val attentionViewModel: AttentionViewModel = viewModel()
-                val attention by attentionViewModel.uiState.collectAsState()
+                val attention by attentionViewModel.uiState.collectAsStateWithLifecycle()
                 val homeViewModel: HomeViewModel = viewModel()
-                val home by homeViewModel.uiState.collectAsState()
-                LaunchedEffect(lifecycleRefresh) { homeViewModel.refresh() }
+                val home by homeViewModel.uiState.collectAsStateWithLifecycle()
                 var destination by remember { mutableStateOf(MainDestination.HOME) }
                 var lastPrimary by remember { mutableStateOf(MainDestination.HOME) }
                 var selectedEpisodeId by remember { mutableStateOf<String?>(null) }
@@ -101,7 +102,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 var selectedDriftPackages by remember { mutableStateOf(DriftPoolPreferences.load(this@MainActivity)) }
-                val availableDriftApps = remember(lifecycleRefresh) {
+                val availableDriftApps = remember {
+                    // Enumerating every launchable app is comparatively expensive. The picker only
+                    // needs to refresh when this Activity instance is recreated; normal resume
+                    // cycles should not rescan PackageManager.
                     DriftAppCatalog.installedLaunchableApps(this@MainActivity)
                 }
                 var intentionalCheckInsEnabled by remember { mutableStateOf(IntentionalCheckInPreferences.load(this@MainActivity)) }
@@ -180,7 +184,6 @@ class MainActivity : ComponentActivity() {
                 val snapshot = remember(
                     serviceEnabled,
                     runtime.connected,
-                    runtime.lastHeartbeatMillis,
                     selectedDriftPackages,
                     attention.historyAvailable,
                     lifecycleRefresh,
@@ -242,6 +245,7 @@ class MainActivity : ComponentActivity() {
                             MainDestination.REVIEW -> MainDestination.REVIEW
                             MainDestination.SETTINGS -> lastPrimary
                             MainDestination.DIAGNOSTICS -> MainDestination.SETTINGS
+                            MainDestination.FEEDBACK -> MainDestination.SETTINGS
                             MainDestination.DISCLOSURE -> disclosureReturn
                             MainDestination.DEVELOPER -> MainDestination.SETTINGS
                             MainDestination.INSPECTOR -> MainDestination.DEVELOPER
@@ -376,11 +380,25 @@ class MainActivity : ComponentActivity() {
                                     attentionViewModel.clearHistory()
                                 },
                                 openDiagnostics = { destination = MainDestination.DIAGNOSTICS },
+                                openFeedback = { destination = MainDestination.FEEDBACK },
                                 openDisclosure = {
                                     disclosureReturn = MainDestination.SETTINGS
                                     destination = MainDestination.DISCLOSURE
                                 },
                                 openDeveloper = { destination = MainDestination.DEVELOPER },
+                                modifier = it,
+                            )
+                        }
+                        MainDestination.FEEDBACK -> SecondaryScaffold("Send feedback", { destination = MainDestination.SETTINGS }) {
+                            FeedbackScreen(
+                                status = FeedbackStatus(
+                                    appVersion = BuildConfig.VERSION_NAME,
+                                    androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+                                    accessibilityEnabled = serviceEnabled,
+                                    protectionEnabled = protectionEnabled,
+                                    driftEnabled = selectedDriftPackages.isNotEmpty(),
+                                    notificationControlsEnabled = notificationControlsEnabled,
+                                ),
                                 modifier = it,
                             )
                         }
@@ -429,6 +447,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         refreshAccessibilityState()
         refreshNotificationState()
+        AccessibilityRuntime.onNotificationSettingsChanged()
         lifecycleRefresh += 1
     }
 
@@ -451,6 +470,7 @@ private enum class MainDestination {
     EPISODE,
     PROTECTION,
     SETTINGS,
+    FEEDBACK,
     DIAGNOSTICS,
     DISCLOSURE,
     DEVELOPER,

@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -32,6 +33,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -91,6 +93,12 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 
+private enum class ActivityFilter(val label: String) {
+    ALL("All"),
+    TASK_TUNNELS("Tunnels"),
+    DRIFT("Drift"),
+}
+
 @Composable
 fun AttentionScreen(
     uiState: AttentionUiState,
@@ -100,12 +108,29 @@ fun AttentionScreen(
     reviewProtection: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var filter by remember { mutableStateOf(ActivityFilter.ALL) }
     val activeSession = runtime.tunnelState.activeSession
     val activeEpisodeId = activeSession?.id?.let { "tunnel:$it" }
     val activeDayStart = activeSession?.startedAtMillis?.let(::startOfLocalDay)
-    val episodesByDay = uiState.episodes.groupBy { startOfLocalDay(it.startedAtMillis) }
-    val dayStarts = (episodesByDay.keys + listOfNotNull(activeDayStart)).distinct().sortedDescending()
-    val activeHasEpisode = activeEpisodeId != null && uiState.episodes.any { it.id == activeEpisodeId }
+    val filteredEpisodes = remember(uiState.episodes, filter) {
+        when (filter) {
+            ActivityFilter.ALL -> uiState.episodes
+            ActivityFilter.TASK_TUNNELS -> uiState.episodes.filter { it.type == AttentionEpisodeType.TASK_TUNNEL }
+            ActivityFilter.DRIFT -> uiState.episodes.filter { it.type == AttentionEpisodeType.DRIFT }
+        }
+    }
+    val showActiveSession = activeSession != null && filter != ActivityFilter.DRIFT
+    val episodesByDay = remember(filteredEpisodes) {
+        filteredEpisodes.groupBy { startOfLocalDay(it.startedAtMillis) }
+    }
+    val activeDayForFilter = activeDayStart.takeIf { showActiveSession }
+    val dayStarts = remember(episodesByDay, activeDayForFilter) {
+        (episodesByDay.keys + listOfNotNull(activeDayForFilter)).distinct().sortedDescending()
+    }
+    val activeHasEpisode = remember(activeEpisodeId, filteredEpisodes) {
+        activeEpisodeId != null && filteredEpisodes.any { it.id == activeEpisodeId }
+    }
+    val hasAnyActivity = uiState.episodes.isNotEmpty() || activeSession != null
 
     LazyColumn(
         modifier.fillMaxSize(),
@@ -115,41 +140,101 @@ fun AttentionScreen(
             end = TaskTunnelTokens.ScreenHorizontalPadding,
             bottom = 28.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         if (health.level != ProtectionLevel.ACTIVE) {
-            item {
+            item(key = "protection-repair") {
                 ProtectionRepairRow(health, reviewProtection)
+                Spacer(Modifier.height(14.dp))
+            }
+        }
+
+        if (hasAnyActivity && uiState.historyAvailable) {
+            item(key = "activity-filter") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Last 7 days",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        ActivityFilter.entries.forEach { option ->
+                            FilterChip(
+                                selected = filter == option,
+                                onClick = { filter = option },
+                                label = { Text(option.label) },
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
             }
         }
 
         when {
-            !uiState.historyAvailable -> item {
+            !uiState.historyAvailable -> item(key = "history-unavailable") {
                 ErrorNotice(
                     "Activity history is unavailable",
                     "Task Tunnel can still protect you. Reopen the app and try again.",
                 )
             }
-            dayStarts.isEmpty() -> item {
+            !hasAnyActivity -> item(key = "empty-activity") {
                 EmptyState(
                     "Nothing here yet",
-                    "Recent Task Tunnels and Drift check-ins will appear here.",
+                    "Activity from the last 7 days will appear here.",
                 )
             }
+            dayStarts.isEmpty() -> item(key = "empty-filter") {
+                val title = when (filter) {
+                    ActivityFilter.DRIFT -> "No Drift this week"
+                    ActivityFilter.TASK_TUNNELS -> "No Task Tunnels this week"
+                    ActivityFilter.ALL -> "Nothing here this week"
+                }
+                EmptyState(title, "Try another filter to see your recent activity.")
+            }
             else -> {
-                items(dayStarts, key = { it }) { dayStart ->
+                dayStarts.forEach { dayStart ->
                     val episodes = episodesByDay[dayStart].orEmpty()
                     val fallbackActiveSession = activeSession?.takeIf {
-                        activeDayStart == dayStart && !activeHasEpisode
+                        showActiveSession && activeDayForFilter == dayStart && !activeHasEpisode
                     }
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val rowCount = episodes.size + if (fallbackActiveSession != null) 1 else 0
+
+                    item(key = "day:$dayStart") {
                         SectionHeader(attentionDayLabel(dayStart))
-                        AttentionDayCard(
-                            episodes = episodes,
-                            activeSession = fallbackActiveSession,
-                            activeEpisodeId = activeEpisodeId,
-                            openEpisode = openEpisode,
-                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+
+                    if (fallbackActiveSession != null) {
+                        item(key = "active:${fallbackActiveSession.id}") {
+                            AttentionLazyRowContainer(rowIndex = 0, rowCount = rowCount) {
+                                ActiveSessionRow(fallbackActiveSession)
+                            }
+                        }
+                    }
+
+                    itemsIndexed(
+                        items = episodes,
+                        key = { _, episode -> episode.id },
+                    ) { index, episode ->
+                        val rowIndex = index + if (fallbackActiveSession != null) 1 else 0
+                        AttentionLazyRowContainer(rowIndex = rowIndex, rowCount = rowCount) {
+                            if (episode.type == AttentionEpisodeType.DRIFT) {
+                                DriftEpisodeRow(episode = episode, onClick = { openEpisode(episode) })
+                            } else {
+                                EpisodeRow(
+                                    episode = episode,
+                                    onClick = { openEpisode(episode) },
+                                    isLive = episode.id == activeEpisodeId,
+                                )
+                            }
+                        }
+                    }
+
+                    item(key = "day-gap:$dayStart") {
+                        Spacer(Modifier.height(18.dp))
                     }
                 }
             }
@@ -158,44 +243,29 @@ fun AttentionScreen(
 }
 
 @Composable
-private fun AttentionDayCard(
-    episodes: List<AttentionEpisode>,
-    activeSession: TunnelSession?,
-    activeEpisodeId: String?,
-    openEpisode: (AttentionEpisode) -> Unit,
+private fun AttentionLazyRowContainer(
+    rowIndex: Int,
+    rowCount: Int,
+    content: @Composable () -> Unit,
 ) {
-    val rowCount = episodes.size + if (activeSession != null) 1 else 0
+    val radius = TaskTunnelTokens.CardRadius
+    val shape = when {
+        rowCount <= 1 -> RoundedCornerShape(radius)
+        rowIndex == 0 -> RoundedCornerShape(topStart = radius, topEnd = radius)
+        rowIndex == rowCount - 1 -> RoundedCornerShape(bottomStart = radius, bottomEnd = radius)
+        else -> RoundedCornerShape(0.dp)
+    }
     Column(
-        Modifier
+        modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(TaskTunnelTokens.CardRadius))
+            .clip(shape)
             .background(SurfaceRaised),
     ) {
-        var renderedRows = 0
-        if (activeSession != null) {
-            ActiveSessionRow(activeSession)
-            renderedRows += 1
-            if (renderedRows < rowCount) AttentionRowDivider()
-        }
-        episodes.forEachIndexed { index, episode ->
-            if (episode.type == AttentionEpisodeType.DRIFT) {
-                DriftEpisodeRow(episode = episode, onClick = { openEpisode(episode) })
-            } else {
-                EpisodeRow(
-                    episode = episode,
-                    onClick = { openEpisode(episode) },
-                    isLive = episode.id == activeEpisodeId,
-                )
-            }
-            renderedRows += 1
-            if (renderedRows < rowCount) AttentionRowDivider()
+        content()
+        if (rowIndex < rowCount - 1) {
+            RowDivider(modifier = Modifier.padding(horizontal = 14.dp), inset = true)
         }
     }
-}
-
-@Composable
-private fun AttentionRowDivider() {
-    RowDivider(modifier = Modifier.padding(horizontal = 14.dp), inset = true)
 }
 
 @Composable
@@ -1451,7 +1521,7 @@ fun DisclosureContent() {
     DisclosureItem("Why", "This lets Task Tunnel notice when you move away from the purpose you chose, and when you rapidly hop between selected apps.")
     DisclosureItem("What stays private", "Task Tunnel does not keep screenshots, message contents, searches, video titles, usernames, raw screen text, or raw accessibility trees.")
     DisclosureItem("What is saved", "Your chosen purposes, Drift app choices, meaningful transitions, prompts and the choices you make are stored locally so Attention and Review can work.")
-    DisclosureItem("Where your data lives", "Protection and activity processing stay on this device. Task Tunnel has no account, cloud sync, analytics upload, or remote detector service.")
+    DisclosureItem("Where your data lives", "Protection and activity processing stay on this device. Task Tunnel has no account, cloud sync, analytics upload, or remote detector service. Feedback is sent only when you explicitly tap Send, and the feedback screen shows what can be included.")
 }
 
 @Composable
@@ -1515,6 +1585,7 @@ fun SettingsScreen(
     configureNotificationControls: () -> Unit,
     clearHistory: () -> Unit,
     openDiagnostics: () -> Unit,
+    openFeedback: () -> Unit,
     openDisclosure: () -> Unit,
     openDeveloper: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1556,6 +1627,14 @@ fun SettingsScreen(
                 leading = { TaskTunnelIcon(TaskTunnelIconKind.INFO, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
                 showChevron = true,
                 onClick = openDisclosure,
+            )
+            RowDivider(inset = true)
+            SettingsRow(
+                title = "Report a bug",
+                subtitle = "Send a bug report or feedback to the developer",
+                leading = { TaskTunnelIcon(TaskTunnelIconKind.INFO, Modifier.size(24.dp), MaterialTheme.colorScheme.onSurfaceVariant) },
+                showChevron = true,
+                onClick = openFeedback,
             )
             Spacer(Modifier.height(TaskTunnelTokens.MajorSectionGap))
             SectionHeader("Your data", Modifier.padding(bottom = TaskTunnelTokens.SectionHeaderBottomGap))
